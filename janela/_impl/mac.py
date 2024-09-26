@@ -43,8 +43,15 @@ class MacOSWindowManager(WindowManager):
         windows = []
         window_list = CGWindowListCopyWindowInfo(kCGWindowListOptionAll, kCGNullWindowID)
         for win in window_list:
+            # Filter out non-standard windows
+            if win.get("kCGWindowLayer", 0) != 0:
+                continue
+
             owner_name = win.get("kCGWindowOwnerName", "")
             window_name = win.get("kCGWindowName", "")
+            if not owner_name or not window_name:
+                continue  # Skip windows without names
+
             bounds = win.get("kCGWindowBounds", {})
             window_id = str(win["kCGWindowNumber"])
             window = Window(

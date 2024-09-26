@@ -66,6 +66,8 @@ def mosaic(window_manager: WindowManager):
                     x = monitor.x + col * window_width
                     y = monitor.y + row * window_height
 
+                    logger.debug(f"Resizing and moving window '{window.name}' to ({x}, {y}) with size ({window_width}, {window_height})")
+
                     # Resize and position the window
                     window_manager.resize_window(window, window_width, window_height)
                     window_manager.move_window_to_position(window, x, y)
