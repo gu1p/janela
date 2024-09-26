@@ -1,7 +1,7 @@
 from typing import List, Optional
 import platform
 
-if platform.platform().lower() == 'linux':
+if platform.platform().lower().startswith('linux'):
     from Xlib import display, X
 
 from janela.interfaces.interface import WindowManager
