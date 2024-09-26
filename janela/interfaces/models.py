@@ -8,6 +8,7 @@ if TYPE_CHECKING:
 
 __all__ = ["Monitor", "Window"]
 
+
 @dataclass
 class Monitor:
     id: int

@@ -24,14 +24,20 @@ def mosaic(window_manager: WindowManager):
     for monitor in monitors:
         try:
             # Get windows for this monitor
-            windows = [window for window in window_manager.list_windows() if window.monitor == monitor]
+            windows = [
+                window
+                for window in window_manager.list_windows()
+                if window.monitor == monitor
+            ]
             if not windows:
                 continue  # Skip monitors with no windows
 
             # Sort windows alphabetically, handle cases where window name might be None
-            windows = sorted(windows, key=lambda w: (w.name or '').lower())
+            windows = sorted(windows, key=lambda w: (w.name or "").lower())
 
-            logger.debug(f"Processing {len(windows)} windows on monitor '{monitor.name}'.")
+            logger.debug(
+                f"Processing {len(windows)} windows on monitor '{monitor.name}'."
+            )
 
             # If there's only one window, maximize it
             if len(windows) == 1:
