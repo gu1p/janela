@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "janela"
-version = "0.0.5"
+version = "0.0.6"
 description = "A simple tool to automate window management"
 authors = ["Gustavo <github.dxabr@aleeas.com>"]
 readme = "README.md"
