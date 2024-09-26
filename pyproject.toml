@@ -1,14 +1,19 @@
 [tool.poetry]
 name = "janela"
-version = "0.0.4"
+version = "0.0.5"
 description = "A simple tool to automate window management"
 authors = ["Gustavo <github.dxabr@aleeas.com>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
 python = "^3.8"
-python-xlib = "^0.33"
 
+# Linux-specific dependencies
+python-xlib = { version = "^0.33", markers = "sys_platform == 'linux'" }
+
+# macOS-specific dependencies
+pyobjc = { version = "^10.0", markers = "sys_platform == 'darwin'" }
+pyobjc-framework-Quartz = { version = "^10.0", markers = "sys_platform == 'darwin'" }
 
 [tool.poetry.group.dev.dependencies]
 black = "^24.8.0"

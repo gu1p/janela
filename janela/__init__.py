@@ -1,9 +1,7 @@
 import platform
 import shutil
 
-from ._impl.wmctrl_xdotool_xlib import WindowManagerImpl
 from .interfaces.interface import WindowManager as WM, Monitor, Window
-
 
 __all__ = ["WindowManager", "Monitor", "Window", "playground"]
 
@@ -13,6 +11,8 @@ def WindowManager() -> WM:
         raise NotImplementedError("Windows is not supported yet")
 
     if platform.system().lower() == "linux":
+        from ._impl.wmctrl_xdotool_xlib import WindowManagerImpl
+
         xdotool_path = shutil.which("xdotool")
         wmctrl_path = shutil.which("wmctrl")
 
@@ -24,6 +24,9 @@ def WindowManager() -> WM:
         return WindowManagerImpl(xdotool_path, wmctrl_path)
 
     if platform.system().lower() == "darwin":
-        raise NotImplementedError("Mac is not supported yet")
+        from ._impl.mac import MacOSWindowManager
+
+        return MacOSWindowManager()
+
 
     raise NotImplementedError("Unsupported platform")
