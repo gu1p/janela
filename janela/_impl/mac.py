@@ -56,6 +56,7 @@ class MacOSWindowManager(WindowManager):
                 width=int(bounds.get("Width", 0)),
                 height=int(bounds.get("Height", 0)),
                 is_active=window_id == self.get_active_window_id(),
+                pid=win["kCGWindowOwnerPID"],
             )
             windows.append(window)
         return windows

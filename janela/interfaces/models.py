@@ -45,6 +45,7 @@ class Window:
     height: int
     is_active: bool
     wm: "WindowManager" = field(repr=False)
+    pid: Optional[int] = field(default=None)
 
     @property
     def monitor(self) -> Optional[Monitor]:
