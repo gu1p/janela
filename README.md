@@ -93,90 +93,90 @@ Support for **macOS** platforms is in progress. We are working on bringing Janel
 Arrange all windows in a mosaic pattern across all monitors:
 
 ```python
-from janela import WindowManager, playground
+from janela import Janela, playground
 
 # Initialize the window manager
-wm = WindowManager()
+ja = Janela()
 
 # Arrange windows in a mosaic pattern
-playground.mosaic(wm)
+playground.mosaic(ja)
 ```
 
 ### Moving a Window to Another Monitor
 
 ```python
-from janela import WindowManager
+from janela import Janela
 
 # Initialize the window manager
-wm = WindowManager()
+ja = Janela()
 
 # Get a window by name
-window = wm.get_window_by_name("Mozilla Firefox")
+window = ja.get_window_by_name("Mozilla Firefox")
 
 # Get the target monitor (e.g., monitor with ID 1)
-target_monitor = wm.get_monitor_by_id(1)
+target_monitor = ja.get_monitor_by_id(1)
 
 # Move the window to the target monitor
 if window and target_monitor:
-    window.move_to_monitor(target_monitor)
+  window.move_to_monitor(target_monitor)
 ```
 
 ### Resizing and Moving Windows
 
 ```python
-from janela import WindowManager
+from janela import Janela
 
-wm = WindowManager()
+ja = Janela()
 
 # Get the active window
-window = wm.get_active_window()
+window = ja.get_active_window()
 
 if window:
-    # Move the window to position (100, 100)
-    window.set_position(100, 100)
+  # Move the window to position (100, 100)
+  window.set_position(100, 100)
 
-    # Resize the window to width 800 and height 600
-    window.resize(800, 600)
+  # Resize the window to width 800 and height 600
+  window.resize(800, 600)
 ```
 
 ### Maximizing and Minimizing Windows
 
 ```python
-from janela import WindowManager
+from janela import Janela
 
-wm = WindowManager()
+ja = Janela()
 
 # Get a window by name
-window = wm.get_window_by_name("Terminal")
+window = ja.get_window_by_name("Terminal")
 
 if window:
-    # Maximize the window
-    window.maximize()
+  # Maximize the window
+  window.maximize()
 
-    # Check if the window is maximized
-    if window.is_maximized():
-        print(f"Window '{window.name}' is maximized.")
+  # Check if the window is maximized
+  if window.is_maximized():
+    print(f"Window '{window.name}' is maximized.")
 
-    # Minimize the window
-    window.minimize()
+  # Minimize the window
+  window.minimize()
 ```
 
 ### Focusing and Closing Windows
 
 ```python
-from janela import WindowManager
+from janela import Janela
 
-wm = WindowManager()
+ja = Janela()
 
 # Get a window by name
-window = wm.get_window_by_name("Text Editor")
+window = ja.get_window_by_name("Text Editor")
 
 if window:
-    # Focus the window
-    window.focus()
+  # Focus the window
+  window.focus()
 
-    # Close the window
-    window.close()
+  # Close the window
+  window.close()
 ```
 
 ## API Reference

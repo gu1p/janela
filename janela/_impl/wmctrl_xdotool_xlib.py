@@ -2,13 +2,13 @@ from typing import List, Optional
 
 from Xlib import display, X
 
-from janela.interfaces.interface import WindowManager
+from janela.interfaces.interface import Janela
 from janela.interfaces.models import Monitor, Window
 from janela.logger import logger
 from janela.util.cmd import run_command
 
 
-class WindowManagerImpl(WindowManager):
+class LinuxImpl(Janela):
     def __init__(self, xdotool_path: str, wmctrl_path: str):
         """
         Initialize the WindowManager implementation.

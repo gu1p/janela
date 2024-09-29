@@ -3,10 +3,10 @@ from typing import List, Optional
 
 from janela.interfaces.models import Monitor, Window
 
-__all__ = ["WindowManager"]
+__all__ = ["Janela"]
 
 
-class WindowManager(ABC):
+class Janela(ABC):
     @abstractmethod
     def get_monitors(self) -> List[Monitor]:
         """

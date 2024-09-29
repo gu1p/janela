@@ -1,4 +1,4 @@
 from .models import Monitor, Window
-from .interface import WindowManager
+from .interface import Janela
 
-__all__ = ["Monitor", "Window", "WindowManager"]
+__all__ = ["Monitor", "Window", "Janela"]

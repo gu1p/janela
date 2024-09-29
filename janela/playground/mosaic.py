@@ -1,7 +1,7 @@
 import math
 from typing import Tuple
 
-from janela.interfaces.interface import WindowManager
+from janela.interfaces.interface import Janela
 from janela.interfaces.models import Monitor
 from janela.logger import logger
 
@@ -12,21 +12,21 @@ _UHD_RESOLUTION = (3840, 2160)
 __all__ = ["mosaic"]
 
 
-def mosaic(window_manager: WindowManager):
+def mosaic(ja: Janela):
     """
     Arrange windows in a mosaic pattern across all monitors.
 
-    :param window_manager: An instance of WindowManager to manage windows.
+    :param ja: An instance of WindowManager to manage windows.
     """
     # Get all monitors
-    monitors = window_manager.list_monitors()
+    monitors = ja.list_monitors()
 
     for monitor in monitors:
         try:
             # Get windows for this monitor
             windows = [
                 window
-                for window in window_manager.list_windows()
+                for window in ja.list_windows()
                 if window.monitor == monitor
             ]
             if not windows:
@@ -42,8 +42,8 @@ def mosaic(window_manager: WindowManager):
             # If there's only one window, maximize it
             if len(windows) == 1:
                 window = windows[0]
-                if not window_manager.is_window_maximized(window):
-                    window_manager.maximize_window(window)
+                if not ja.is_window_maximized(window):
+                    ja.maximize_window(window)
                 continue
 
             # Calculate the ideal number of rows and columns for the mosaic
@@ -57,8 +57,8 @@ def mosaic(window_manager: WindowManager):
             for i, window in enumerate(windows):
                 try:
                     # Unmaximize the window if it's maximized
-                    if window_manager.is_window_maximized(window):
-                        window_manager.unmaximize_window(window)
+                    if ja.is_window_maximized(window):
+                        ja.unmaximize_window(window)
 
                     # Calculate the position for this window
                     row = i // columns
@@ -69,8 +69,8 @@ def mosaic(window_manager: WindowManager):
                     logger.debug(f"Resizing and moving window '{window.name}' to ({x}, {y}) with size ({window_width}, {window_height})")
 
                     # Resize and position the window
-                    window_manager.resize_window(window, window_width, window_height)
-                    window_manager.move_window_to_position(window, x, y)
+                    ja.resize_window(window, window_width, window_height)
+                    ja.move_window_to_position(window, x, y)
                 except Exception as e:
                     logger.exception(f"Error processing window '{window.name}': {e}")
         except Exception as e:

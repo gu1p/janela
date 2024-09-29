@@ -9,11 +9,11 @@ from Quartz import (
     kCGWindowListOptionAll,
 )
 
-from janela.interfaces import WindowManager
+from janela.interfaces import Janela
 from janela.interfaces.models import Monitor, Window
 
 
-class MacOSWindowManager(WindowManager):
+class MacOSImpl(Janela):
     def get_monitors(self) -> List[Monitor]:
         monitors = []
         for screen in NSScreen.screens():

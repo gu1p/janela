@@ -1,17 +1,18 @@
 import platform
 import shutil
 
-from .interfaces.interface import WindowManager as WM, Monitor, Window
+from .interfaces.interface import Janela as JanelaInterface
+from .interfaces.models import Monitor, Window
 
-__all__ = ["WindowManager", "Monitor", "Window", "playground"]
+__all__ = ["Janela", "Monitor", "Window", "playground"]
 
 
-def WindowManager() -> WM:
+def Janela() -> JanelaInterface:
     if platform.system().lower() == "windows":
         raise NotImplementedError("Windows is not supported yet")
 
     if platform.system().lower() == "linux":
-        from ._impl.wmctrl_xdotool_xlib import WindowManagerImpl
+        from ._impl.wmctrl_xdotool_xlib import LinuxImpl
 
         xdotool_path = shutil.which("xdotool")
         wmctrl_path = shutil.which("wmctrl")
@@ -21,12 +22,12 @@ def WindowManager() -> WM:
         if not wmctrl_path:
             raise FileNotFoundError("wmctrl not found")
 
-        return WindowManagerImpl(xdotool_path, wmctrl_path)
+        return LinuxImpl(xdotool_path, wmctrl_path)
 
     if platform.system().lower() == "darwin":
-        from ._impl.mac import MacOSWindowManager
+        from ._impl.mac import MacOSImpl
 
-        return MacOSWindowManager()
+        return MacOSImpl()
 
 
     raise NotImplementedError("Unsupported platform")

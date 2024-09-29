@@ -1,6 +1,6 @@
-from janela import WindowManager
+from janela import Janela
 from janela.playground import mosaic
 
 if __name__ == "__main__":
-    wm = WindowManager()
-    mosaic(wm)
+    ja = Janela()
+    mosaic(ja)

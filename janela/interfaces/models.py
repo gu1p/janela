@@ -3,7 +3,7 @@ from typing import List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     # Avoid circular import
-    from interface import WindowManager
+    from interface import Janela
 
 
 __all__ = ["Monitor", "Window"]
@@ -17,7 +17,7 @@ class Monitor:
     y: int
     width: int
     height: int
-    wm: "WindowManager" = field(repr=False)
+    wm: "Janela" = field(repr=False)
 
     def list_windows(self) -> List["Window"]:
         return [w for w in self.wm.list_windows() if self.contains(w.x, w.y)]
@@ -44,7 +44,7 @@ class Window:
     width: int
     height: int
     is_active: bool
-    wm: "WindowManager" = field(repr=False)
+    wm: "Janela" = field(repr=False)
     pid: Optional[int] = field(default=None)
 
     @property
