@@ -93,13 +93,13 @@ Support for **macOS** platforms is in progress. We are working on bringing Janel
 Arrange all windows in a mosaic pattern across all monitors:
 
 ```python
-from janela import Janela, playground
+from janela import Janela, effects
 
 # Initialize the window manager
 ja = Janela()
 
 # Arrange windows in a mosaic pattern
-playground.mosaic(ja)
+effects.mosaic(ja)
 ```
 
 ### Moving a Window to Another Monitor

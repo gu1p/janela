@@ -4,7 +4,7 @@ import shutil
 from .interfaces.interface import Janela as JanelaInterface
 from .interfaces.models import Monitor, Window
 
-__all__ = ["Janela", "Monitor", "Window", "playground"]
+__all__ = ["Janela", "Monitor", "Window", "effects"]
 
 
 def Janela() -> JanelaInterface:

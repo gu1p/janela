@@ -1,5 +1,5 @@
 from janela import Janela
-from janela.playground import mosaic
+from janela.effects import mosaic
 
 if __name__ == "__main__":
     ja = Janela()
