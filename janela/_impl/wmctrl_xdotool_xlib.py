@@ -191,28 +191,28 @@ class LinuxImpl(Janela):
         # Check if the window is on the correct monitor
         updated_monitor = self.get_monitor_for_window(updated_window)
         if updated_monitor != target_monitor:
-                logger.warning(
-                    "Window %s is on monitor %s, expected %s",
-                    window.name,
-                    updated_monitor.id if updated_monitor else "Unknown",
-                    target_monitor.id,
-                )
-                return False
+            logger.warning(
+                "Window %s is on monitor %s, expected %s",
+                window.name,
+                updated_monitor.id if updated_monitor else "Unknown",
+                target_monitor.id,
+            )
+            return False
 
-            # Check if the window position is close to the expected position
-            tolerance = 10  # Reduced tolerance for better accuracy
-            if (
-                abs(updated_window.x - expected_x) > tolerance
-                or abs(updated_window.y - expected_y) > tolerance
-            ):
-                logger.warning(
-                    "Window %s position (%s, %s) is not close to expected (%s, %s)",
-                    window.name,
-                    updated_window.x,
-                    updated_window.y,
-                    expected_x,
-                    expected_y,
-                )
+        # Check if the window position is close to the expected position
+        tolerance = 10  # Reduced tolerance for better accuracy
+        if (
+            abs(updated_window.x - expected_x) > tolerance
+            or abs(updated_window.y - expected_y) > tolerance
+        ):
+            logger.warning(
+                "Window %s position (%s, %s) is not close to expected (%s, %s)",
+                window.name,
+                updated_window.x,
+                updated_window.y,
+                expected_x,
+                expected_y,
+            )
             return False
 
         # Update the original window object with the new position
