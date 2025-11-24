@@ -1,3 +1,6 @@
+"""Linux implementation using wmctrl/xdotool/Xlib."""
+# pylint: disable=import-error,logging-fstring-interpolation,line-too-long
+
 from typing import List, Optional
 
 from Xlib import display, X
@@ -9,6 +12,7 @@ from janela.util.cmd import run_command
 
 
 class LinuxImpl(Janela):
+    """Linux-specific window management implementation."""
     def __init__(self, xdotool_path: str, wmctrl_path: str):
         """
         Initialize the WindowManager implementation.
@@ -49,7 +53,7 @@ class LinuxImpl(Janela):
             return ""
         return f"0x{int(decimal_id):x}"
 
-    def list_windows(self) -> List[Window]:
+    def list_windows(self) -> List[Window]:  # pylint: disable=too-many-locals
         active_window_id = self.get_active_window_id()
         output = run_command([self.wmctrl_path, "-lG"])
         windows = []
@@ -58,7 +62,7 @@ class LinuxImpl(Janela):
             if len(parts) < 8:
                 logger.warning(f"Unexpected wmctrl output: {line}")
                 continue
-            window_id, desktop_id, x, y, width, height, host, name = parts
+            window_id, _desktop_id, x, y, width, height, _host, name = parts
             # Skip unwanted windows
             if name.startswith("Desktop — Plasma") or name.startswith("Plasma"):
                 continue
@@ -187,20 +191,28 @@ class LinuxImpl(Janela):
         # Check if the window is on the correct monitor
         updated_monitor = self.get_monitor_for_window(updated_window)
         if updated_monitor != target_monitor:
-            logger.warning(
-                f"Window {window.name} is on monitor {updated_monitor.id if updated_monitor else 'Unknown'}, expected {target_monitor.id}"
-            )
-            return False
+                logger.warning(
+                    "Window %s is on monitor %s, expected %s",
+                    window.name,
+                    updated_monitor.id if updated_monitor else "Unknown",
+                    target_monitor.id,
+                )
+                return False
 
-        # Check if the window position is close to the expected position
-        tolerance = 10  # Reduced tolerance for better accuracy
-        if (
-            abs(updated_window.x - expected_x) > tolerance
-            or abs(updated_window.y - expected_y) > tolerance
-        ):
-            logger.warning(
-                f"Window {window.name} position ({updated_window.x}, {updated_window.y}) is not close to expected ({expected_x}, {expected_y})"
-            )
+            # Check if the window position is close to the expected position
+            tolerance = 10  # Reduced tolerance for better accuracy
+            if (
+                abs(updated_window.x - expected_x) > tolerance
+                or abs(updated_window.y - expected_y) > tolerance
+            ):
+                logger.warning(
+                    "Window %s position (%s, %s) is not close to expected (%s, %s)",
+                    window.name,
+                    updated_window.x,
+                    updated_window.y,
+                    expected_x,
+                    expected_y,
+                )
             return False
 
         # Update the original window object with the new position

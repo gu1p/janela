@@ -1,3 +1,5 @@
+"""Janela package entrypoint."""
+
 import platform
 import shutil
 
@@ -7,11 +9,13 @@ from .interfaces.models import Monitor, Window
 __all__ = ["Janela", "Monitor", "Window", "effects"]
 
 
-def Janela() -> JanelaInterface:
+def Janela() -> JanelaInterface:  # pylint: disable=invalid-name
+    """Factory that returns the platform-specific window manager implementation."""
     if platform.system().lower() == "windows":
         raise NotImplementedError("Windows is not supported yet")
 
     if platform.system().lower() == "linux":
+        # pylint: disable=import-outside-toplevel
         from ._impl.wmctrl_xdotool_xlib import LinuxImpl
 
         xdotool_path = shutil.which("xdotool")
@@ -25,9 +29,9 @@ def Janela() -> JanelaInterface:
         return LinuxImpl(xdotool_path, wmctrl_path)
 
     if platform.system().lower() == "darwin":
+        # pylint: disable=import-outside-toplevel
         from ._impl.mac import MacOSImpl
 
         return MacOSImpl()
-
 
     raise NotImplementedError("Unsupported platform")

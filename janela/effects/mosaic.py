@@ -1,3 +1,7 @@
+"""Window tiling effects."""
+
+# pylint: disable=too-many-branches,too-many-statements,too-many-nested-blocks,R0914,broad-except
+# pylint: disable=logging-fstring-interpolation
 import math
 from typing import Tuple
 
@@ -37,9 +41,7 @@ def mosaic(ja: Janela):
             # Sort windows alphabetically, handle cases where window name might be None
             windows = sorted(windows, key=lambda w: (w.name or "").lower())
 
-            logger.debug(
-                f"Processing {len(windows)} windows on monitor '{monitor.name}'."
-            )
+            logger.debug("Processing %d windows on monitor '%s'.", len(windows), monitor.name)
 
             # If there's only one window, maximize it
             if len(windows) == 1:
@@ -99,14 +101,19 @@ def mosaic(ja: Janela):
                             current_x += width
 
                             logger.debug(
-                                f"Resizing and moving window '{window.name}' to ({x}, {y}) with size ({width}, {height})"
+                                "Resizing and moving window '%s' to (%d, %d) with size (%d, %d)",
+                                window.name,
+                                x,
+                                y,
+                                width,
+                                height,
                             )
 
                             ja.resize_window(window, width, height)
                             ja.move_window_to_position(window, x, y)
                             placements.append((window, x, y, width, height))
-                        except Exception as e:
-                            logger.exception(f"Error processing window '{window.name}': {e}")
+                        except Exception as e:  # pylint: disable=broad-except
+                            logger.exception("Error processing window '%s': %s", window.name, e)
 
                     current_y += row_height
 
@@ -132,11 +139,11 @@ def mosaic(ja: Janela):
                         ja.unmaximize_window(window)
                     ja.resize_window(window, width, height)
                     ja.move_window_to_position(window, x, y)
-                except Exception as e:
-                    logger.exception(f"Retry failed for window '{window.name}': {e}")
+                except Exception as e:  # pylint: disable=broad-except
+                    logger.exception("Retry failed for window '%s': %s", window.name, e)
 
-        except Exception as e:
-            logger.exception(f"Error processing monitor '{monitor.name}': {e}")
+        except Exception as e:  # pylint: disable=broad-except
+            logger.exception("Error processing monitor '%s': %s", monitor.name, e)
 
 
 def get_number_of_rows_columns(window_count: int, monitor: Monitor) -> Tuple[int, int]:
@@ -158,7 +165,7 @@ def get_number_of_rows_columns(window_count: int, monitor: Monitor) -> Tuple[int
     if aspect_ratio == 16 / 9 and monitor.width >= _FULL_HD_RESOLUTION[0]:
         if window_count == 2:
             return 1, 2
-        elif window_count == 3 and monitor.width >= _QHD_RESOLUTION[0]:
+        if window_count == 3 and monitor.width >= _QHD_RESOLUTION[0]:
             return 1, 3
 
     # Calculate the aspect ratio of the monitor

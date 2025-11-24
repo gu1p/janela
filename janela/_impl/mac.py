@@ -1,3 +1,6 @@
+"""macOS implementation using Accessibility APIs."""
+# pylint: disable=import-error,logging-fstring-interpolation,broad-except
+
 import os
 import subprocess
 from typing import Dict, List, Optional, Tuple
@@ -18,7 +21,9 @@ from janela.logger import logger
 
 # Map Quartz symbols through submodules explicitly; fall back to string names if missing.
 AXIsProcessTrustedWithOptions = AS.AXIsProcessTrustedWithOptions
-kAXTrustedCheckOptionPrompt = getattr(AS, "kAXTrustedCheckOptionPrompt", "AXTrustedCheckOptionPrompt")
+kAXTrustedCheckOptionPrompt = getattr(
+    AS, "kAXTrustedCheckOptionPrompt", "AXTrustedCheckOptionPrompt"
+)
 AXUIElementCopyAttributeValue = AS.AXUIElementCopyAttributeValue
 AXUIElementCreateApplication = AS.AXUIElementCreateApplication
 AXUIElementPerformAction = AS.AXUIElementPerformAction
@@ -38,7 +43,8 @@ kCGWindowListOptionAll = CG.kCGWindowListOptionAll
 kCGWindowListOptionOnScreenOnly = CG.kCGWindowListOptionOnScreenOnly
 
 
-class MacOSImpl(Janela):
+class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
+    """macOS-specific window management implementation."""
     def __init__(self) -> None:
         self._ensure_accessibility_permissions()
         self._screen_recording_checked = False
@@ -54,7 +60,11 @@ class MacOSImpl(Janela):
     def _ensure_accessibility_permissions(self) -> None:
         # Prompt the user automatically if access has not been granted.
         options = {kAXTrustedCheckOptionPrompt: True} if kAXTrustedCheckOptionPrompt else None
-        trusted = AXIsProcessTrustedWithOptions(options) if options is not None else getattr(AS, "AXIsProcessTrusted", lambda: False)()
+        trusted = (
+            AXIsProcessTrustedWithOptions(options)
+            if options is not None
+            else getattr(AS, "AXIsProcessTrusted", lambda: False)()
+        )
         if not trusted:
             raise PermissionError(
                 "Janela requires Accessibility access. Grant permission in "
@@ -90,7 +100,8 @@ class MacOSImpl(Janela):
             subprocess.run(
                 [
                     "open",
-                    "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenRecording",
+                    "x-apple.systempreferences:com.apple.preference.security?"
+                    "Privacy_ScreenRecording",
                 ],
                 check=False,
             )
@@ -101,7 +112,8 @@ class MacOSImpl(Janela):
             )
 
     def _to_cg_y(self, screen_y: int, screen_height: int) -> int:
-        # Convert NSScreen (origin bottom-left) to CG window coordinates (origin top-left of main display)
+        # Convert NSScreen (origin bottom-left) to CG window coordinates
+        # (origin top-left of main display)
         return self._main_screen_height - (screen_y + screen_height)
 
     def get_monitors(self) -> List[Monitor]:
@@ -210,7 +222,7 @@ class MacOSImpl(Janela):
             logger.warning(
                 "No windows found. macOS may require Screen Recording permission "
                 "for this terminal/app to enumerate other apps' windows. "
-                "Enable it in System Settings → Privacy & Security → Screen Recording. Opening settings…"
+                "Enable it in System Settings → Privacy & Security → Screen Recording."
             )
             self._open_screen_recording_settings()
             self._warned_screen_recording = True
@@ -241,11 +253,15 @@ class MacOSImpl(Janela):
                 )
             )
 
-        if windows and all(w.pid == os.getpid() for w in windows) and not self._warned_screen_recording:
+        if (
+            windows
+            and all(w.pid == os.getpid() for w in windows)
+            and not self._warned_screen_recording
+        ):
             logger.warning(
                 "Only this Python process is visible. macOS often restricts window "
-                "enumeration without Screen Recording permission. "
-                "Enable it in System Settings → Privacy & Security → Screen Recording. Opening settings…"
+                "enumeration without Screen Recording permission. Enable it in "
+                "System Settings → Privacy & Security → Screen Recording."
             )
             self._open_screen_recording_settings()
             self._warned_screen_recording = True
@@ -254,7 +270,10 @@ class MacOSImpl(Janela):
     def get_monitor_for_window(self, window: Window) -> Optional[Monitor]:
         monitors = self.get_monitors()
         for monitor in monitors:
-            if monitor.x <= window.x < monitor.x + monitor.width and monitor.y <= window.y < monitor.y + monitor.height:
+            if (
+                monitor.x <= window.x < monitor.x + monitor.width
+                and monitor.y <= window.y < monitor.y + monitor.height
+            ):
                 return monitor
         return None
 

@@ -1,3 +1,5 @@
+"""Interfaces for Janela implementations."""
+
 from abc import ABC, abstractmethod
 from typing import List, Optional
 
@@ -6,7 +8,8 @@ from janela.interfaces.models import Monitor, Window
 __all__ = ["Janela"]
 
 
-class Janela(ABC):
+class Janela(ABC):  # pylint: disable=too-many-public-methods
+    """Abstract base class for platform-specific window managers."""
     @abstractmethod
     def get_monitors(self) -> List[Monitor]:
         """
@@ -14,7 +17,7 @@ class Janela(ABC):
 
         :return: A list of Monitor objects.
         """
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     def get_active_window_id(self) -> str:
@@ -23,7 +26,7 @@ class Janela(ABC):
 
         :return: The window ID as a hexadecimal string.
         """
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     def list_windows(self) -> List[Window]:
@@ -32,6 +35,7 @@ class Janela(ABC):
 
         :return: A list of Window objects.
         """
+        raise NotImplementedError
 
     @abstractmethod
     def get_monitor_for_window(self, window: Window) -> Optional[Monitor]:
@@ -41,7 +45,7 @@ class Janela(ABC):
           :param window: The window to check.
           :return: The Monitor object or None if not found.
         """
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     def move_window_to_position(self, window: Window, x: int, y: int):
@@ -52,7 +56,7 @@ class Janela(ABC):
         :param x: The x-coordinate.
         :param y: The y-coordinate.
         """
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     def resize_window(self, window: Window, width: int, height: int):
@@ -63,7 +67,7 @@ class Janela(ABC):
         :param width: The new width.
         :param height: The new height.
         """
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     def minimize_window(self, window: Window):
@@ -72,6 +76,7 @@ class Janela(ABC):
 
         :param window: The window to minimize.
         """
+        raise NotImplementedError
 
     @abstractmethod
     def maximize_window(self, window: Window):
@@ -80,6 +85,7 @@ class Janela(ABC):
 
         :param window: The window to maximize.
         """
+        raise NotImplementedError
 
     @abstractmethod
     def move_to_monitor(self, window: Window, monitor: Monitor):
@@ -89,6 +95,7 @@ class Janela(ABC):
         :param window: The window to move.
         :param monitor: The target monitor.
         """
+        raise NotImplementedError
 
     @abstractmethod
     def verify_window_move(
@@ -103,6 +110,7 @@ class Janela(ABC):
         :param expected_y: The expected y-coordinate.
         :return: True if the window is correctly positioned, False otherwise.
         """
+        raise NotImplementedError
 
     @abstractmethod
     def get_window_by_id(self, window_id: str) -> Optional[Window]:
@@ -112,6 +120,7 @@ class Janela(ABC):
         :param window_id: The window ID.
         :return: The Window object or None if not found.
         """
+        raise NotImplementedError
 
     @abstractmethod
     def focus_window(self, window: Window):
@@ -120,6 +129,7 @@ class Janela(ABC):
 
         :param window: The window to focus.
         """
+        raise NotImplementedError
 
     @abstractmethod
     def close_window(self, window: Window):
@@ -128,6 +138,7 @@ class Janela(ABC):
 
         :param window: The window to close.
         """
+        raise NotImplementedError
 
     @abstractmethod
     def list_monitors(self) -> List[Monitor]:
@@ -136,6 +147,7 @@ class Janela(ABC):
 
         :return: A sorted list of Monitor objects.
         """
+        raise NotImplementedError
 
     @abstractmethod
     def get_active_window(self) -> Optional[Window]:
@@ -144,12 +156,14 @@ class Janela(ABC):
 
         :return: The active Window object or None if not found.
         """
+        raise NotImplementedError
 
     @abstractmethod
     def verify_window_positions(self) -> bool:
         """
         Verify the positions of all windows on all monitors.
         """
+        raise NotImplementedError
 
     @abstractmethod
     def get_window_by_name(self, name: str) -> Optional[Window]:
@@ -159,6 +173,7 @@ class Janela(ABC):
         :param name: The name to search for.
         :return: The Window object or None if not found.
         """
+        raise NotImplementedError
 
     @abstractmethod
     def get_monitor_by_id(self, monitor_id: int) -> Optional[Monitor]:
@@ -168,6 +183,7 @@ class Janela(ABC):
         :param monitor_id: The monitor ID.
         :return: The Monitor object or None if not found.
         """
+        raise NotImplementedError
 
     @abstractmethod
     def is_window_maximized(self, window: Window) -> bool:
@@ -177,6 +193,7 @@ class Janela(ABC):
         :param window: The window to check.
         :return: True if maximized, False otherwise.
         """
+        raise NotImplementedError
 
     @abstractmethod
     def unmaximize_window(self, window: Window) -> None:
@@ -185,6 +202,7 @@ class Janela(ABC):
 
         :param window: The window to unmaximize.
         """
+        raise NotImplementedError
 
     def can_control_window(self, window: Window) -> bool:
         """
@@ -192,4 +210,5 @@ class Janela(ABC):
 
         By default returns True; platform-specific implementations may override.
         """
+        del window
         return True
