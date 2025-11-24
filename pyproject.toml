@@ -12,7 +12,9 @@ python = "^3.8"
 python-xlib = { version = "^0.33", markers = "sys_platform == 'linux'" }
 
 # macOS-specific dependencies
-pyobjc = { version = "^10.0", markers = "sys_platform == 'darwin'" }
+pyobjc-core = { version = "^10.0", markers = "sys_platform == 'darwin'" }
+pyobjc-framework-Cocoa = { version = "^10.0", markers = "sys_platform == 'darwin'" }
+pyobjc-framework-ApplicationServices = { version = "^10.0", markers = "sys_platform == 'darwin'" }
 pyobjc-framework-Quartz = { version = "^10.0", markers = "sys_platform == 'darwin'" }
 
 [tool.poetry.group.dev.dependencies]

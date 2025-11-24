@@ -26,7 +26,7 @@ A simple Python package for managing and manipulating application windows on **G
 - [Installation](#installation)
   - [Linux](#linux)
   - [Windows (Coming Soon)](#windows-coming-soon)
-  - [macOS (Coming Soon)](#macos-coming-soon)
+  - [macOS](#macos)
 - [Requirements](#requirements)
 - [Usage](#usage)
   - [Basic Example](#basic-example)
@@ -70,19 +70,25 @@ pip install janela
 
 Support for **Windows** platforms is currently under development. Stay tuned for upcoming releases that will include Windows support.
 
-### macOS (Coming Soon)
+### macOS
 
-Support for **macOS** platforms is in progress. We are working on bringing Janela's capabilities to macOS users in future updates.
+Install from PyPI (this pulls the necessary PyObjC/Quartz bindings automatically):
+
+```bash
+pip install janela
+```
+
+On first run, macOS will prompt you for **Accessibility** permission for the Python interpreter or terminal you are using. Approve that prompt (or pre-authorize via *System Settings → Privacy & Security → Accessibility*). Janela will request this permission automatically when needed.
 
 ## Requirements
 
-- **Linux operating system**
 - **Python 3.6 or higher**
-- System packages (Linux only):
-  - [`xdotool`](https://www.semicomplete.com/projects/xdotool/)
-  - [`wmctrl`](http://tomas.styblo.name/wmctrl/)
-- Python packages:
-  - [`python-xlib`](https://pypi.org/project/python-xlib/)
+- **Linux**:
+  - System packages: [`xdotool`](https://www.semicomplete.com/projects/xdotool/), [`wmctrl`](http://tomas.styblo.name/wmctrl/)
+  - Python packages: [`python-xlib`](https://pypi.org/project/python-xlib/)
+- **macOS**:
+  - Python packages: [`pyobjc-core`](https://pypi.org/project/pyobjc-core/), [`pyobjc-framework-Cocoa`](https://pypi.org/project/pyobjc-framework-Cocoa/), [`pyobjc-framework-ApplicationServices`](https://pypi.org/project/pyobjc-framework-ApplicationServices/), [`pyobjc-framework-Quartz`](https://pypi.org/project/pyobjc-framework-Quartz/)
+  - Permissions: Accessibility (Janela will prompt automatically) and Screen Recording (needed for listing/managing other apps' windows)
 
 ## Usage
 
@@ -264,4 +270,3 @@ This project is licensed under the **MIT License**. See the [LICENSE](LICENSE) f
 - [xdotool](https://www.semicomplete.com/projects/xdotool/) - Simulate keyboard input and mouse activity.
 - [wmctrl](http://tomas.styblo.name/wmctrl/) - Interact with an X Window Manager.
 - [python-xlib](https://pypi.org/project/python-xlib/) - Python interface to the X11 protocol client library.
-
