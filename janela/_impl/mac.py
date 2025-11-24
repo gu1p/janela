@@ -547,30 +547,15 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
         finally:
             _safe_cf_release(size_value)
 
-    def _ax_position_for(self, _window: Window, x: int, y: int, _height: Optional[int] = None) -> Tuple[int, int]:
-        """macOS AX appears to accept CG-style bottom-left coords; keep identity."""
-        return x, y
-
-    def _clamp_to_monitor(
-        self,
-        window: Window,
-        x: int,
-        y: int,
-        width: Optional[int] = None,
-        height: Optional[int] = None,
-    ) -> Tuple[int, int]:
+    def _ax_position_for(self, window: Window, x: int, y: int, height: Optional[int] = None) -> Tuple[int, int]:
+        """Convert bottom-left CG coords to top-left AX coords for positioning."""
         monitor = self.get_monitor_for_window(window)
-        if not monitor:
-            return x, y
-        w = width if width is not None else window.width
-        h = height if height is not None else window.height
-        min_x = monitor.x
-        min_y = monitor.y
-        max_x = monitor.x + monitor.width - w
-        max_y = monitor.y + monitor.height - h
-        clamped_x = min(max(x, min_x), max_x)
-        clamped_y = min(max(y, min_y), max_y)
-        return clamped_x, clamped_y
+        rect_height = height if height is not None else window.height
+        if monitor:
+            relative_bottom = y - monitor.y
+            y_ax = monitor.y + monitor.height - (relative_bottom + rect_height)
+            return x, y_ax
+        return x, y
 
     def _get_pid_bounds(self, pid: int) -> Dict[str, Tuple[int, int, int, int]]:
         """Return current CG bounds for a PID keyed by window id."""
@@ -611,7 +596,6 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
         dx, dy = 80, 60
         target_x = primary_pos[0] + dx
         target_y = primary_pos[1] + dy
-        target_x, target_y = self._clamp_to_monitor(primary.window, target_x, target_y, primary.bounds[2], primary.bounds[3])
         ax_x, ax_y = self._ax_position_for(primary.window, target_x, target_y, primary.bounds[3])
         if not self._set_window_position(ax_primary, ax_x, ax_y):
             logger.debug("Coupling probe: move failed for pid %s window %s", pid, primary.window.name)
@@ -639,8 +623,7 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
                 coupled.add(rec.window.id)
                 self._merge_members(primary, rec.members)
 
-        orig_x, orig_y = self._clamp_to_monitor(primary.window, primary_pos[0], primary_pos[1], primary.bounds[2], primary.bounds[3])
-        orig_ax_x, orig_ax_y = self._ax_position_for(primary.window, orig_x, orig_y, primary.bounds[3])
+        orig_ax_x, orig_ax_y = self._ax_position_for(primary.window, primary_pos[0], primary_pos[1], primary.bounds[3])
         self._set_window_position(ax_primary, orig_ax_x, orig_ax_y)
         return coupled
 
@@ -850,7 +833,6 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
         if not ax_window:
             logger.error(f"Could not find AX window for '{window.name}'")
             return
-        x, y = self._clamp_to_monitor(window, x, y)
         ax_x, ax_y = self._ax_position_for(window, x, y)
         if self._set_window_position(ax_window, ax_x, ax_y):
             self._update_cached_window(window, position=(x, y))
