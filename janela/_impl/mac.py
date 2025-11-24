@@ -1,70 +1,322 @@
 """macOS implementation using Accessibility APIs."""
-# pylint: disable=import-error,logging-fstring-interpolation,broad-except
+# pylint: disable=import-error,logging-fstring-interpolation,broad-except,invalid-name,line-too-long
+# pylint: disable=too-few-public-methods,global-statement,too-many-statements,too-many-branches
+# pylint: disable=too-many-locals,too-many-instance-attributes,too-many-arguments
 
+import ctypes
+import ctypes.util
 import os
+import plistlib
 import subprocess
 from typing import Dict, List, Optional, Tuple
-
-from AppKit import (
-    NSScreen,
-    NSWorkspace,
-    NSRunningApplication,
-    NSApplicationActivateIgnoringOtherApps,
-)
-import ApplicationServices as AS
-from Quartz import CoreGraphics as CG
 
 from janela.interfaces import Janela
 from janela.interfaces.models import Monitor, Window
 from janela.logger import logger
 
 
-# Map Quartz symbols through submodules explicitly; fall back to string names if missing.
-AXIsProcessTrustedWithOptions = AS.AXIsProcessTrustedWithOptions
-kAXTrustedCheckOptionPrompt = getattr(
-    AS, "kAXTrustedCheckOptionPrompt", "AXTrustedCheckOptionPrompt"
-)
-AXUIElementCopyAttributeValue = AS.AXUIElementCopyAttributeValue
-AXUIElementCreateApplication = AS.AXUIElementCreateApplication
-AXUIElementPerformAction = AS.AXUIElementPerformAction
-AXUIElementSetAttributeValue = AS.AXUIElementSetAttributeValue
-AXValueCreate = AS.AXValueCreate
-kAXErrorSuccess = getattr(AS, "kAXErrorSuccess", 0)
-kAXMinimizedAttribute = getattr(AS, "kAXMinimizedAttribute", "AXMinimized")
-kAXPositionAttribute = getattr(AS, "kAXPositionAttribute", "AXPosition")
-kAXSizeAttribute = getattr(AS, "kAXSizeAttribute", "AXSize")
-kAXTitleAttribute = getattr(AS, "kAXTitleAttribute", "AXTitle")
-kAXValueCGPointType = getattr(AS, "kAXValueCGPointType", None)
-kAXValueCGSizeType = getattr(AS, "kAXValueCGSizeType", None)
-kAXWindowsAttribute = getattr(AS, "kAXWindowsAttribute", "AXWindows")
-CGWindowListCopyWindowInfo = CG.CGWindowListCopyWindowInfo
-kCGNullWindowID = CG.kCGNullWindowID
-kCGWindowListOptionAll = CG.kCGWindowListOptionAll
-kCGWindowListOptionOnScreenOnly = CG.kCGWindowListOptionOnScreenOnly
+# Core Foundation / Core Graphics / Accessibility bindings are kept lightweight to avoid
+# importing the heavy PyObjC umbrella frameworks at startup.
+CF = None  # type: ignore
+CG = None  # type: ignore
+AS = None  # type: ignore
+
+# CoreFoundation types and helpers
+c_void_p = ctypes.c_void_p
+c_uint32 = ctypes.c_uint32
+c_int32 = ctypes.c_int32
+c_bool = ctypes.c_bool
+c_long = ctypes.c_long
+c_longlong = ctypes.c_longlong
+c_double = ctypes.c_double
+
+kCFStringEncodingUTF8 = 0x08000100
+kCFPropertyListBinaryFormat_v1_0 = 200
+kCFNumberSInt64Type = 4
+
+kAXErrorSuccess = 0
+kAXValueCGPointType = 1
+kAXValueCGSizeType = 2
+
+kCGWindowListOptionAll = 0
+kCGWindowListOptionOnScreenOnly = 1
+kCGNullWindowID = 0
+
+
+def _windows_overlap(a: Window, b: Window, threshold: float = 0.9) -> bool:
+    """Return True when windows overlap almost entirely (used to drop tab/duplicate views)."""
+    ax2, ay2 = a.x + a.width, a.y + a.height
+    bx2, by2 = b.x + b.width, b.y + b.height
+    inter_w = max(0, min(ax2, bx2) - max(a.x, b.x))
+    inter_h = max(0, min(ay2, by2) - max(a.y, b.y))
+    inter_area = inter_w * inter_h
+    min_area = min(a.width * a.height, b.width * b.height)
+    return min_area > 0 and inter_area >= min_area * threshold
+
+# Populated at runtime by _init_mac_apis
+CFRelease = None  # type: ignore
+CFRetain = None  # type: ignore
+CFDictionaryCreate = None  # type: ignore
+CFStringCreateWithCString = None  # type: ignore
+CFStringGetCString = None  # type: ignore
+CFStringGetLength = None  # type: ignore
+CFStringGetMaximumSizeForEncoding = None  # type: ignore
+CFNumberGetValue = None  # type: ignore
+CFPropertyListCreateData = None  # type: ignore
+CFDataGetLength = None  # type: ignore
+CFDataGetBytePtr = None  # type: ignore
+CFArrayGetCount = None  # type: ignore
+CFArrayGetValueAtIndex = None  # type: ignore
+
+kCFBooleanTrue = None  # type: ignore
+kCFBooleanFalse = None  # type: ignore
+
+CGWindowListCopyWindowInfo = None  # type: ignore
+CGGetActiveDisplayList = None  # type: ignore
+CGDisplayBounds = None  # type: ignore
+CGMainDisplayID = None  # type: ignore
+CGPreflightScreenCaptureAccess = None  # type: ignore
+CGRequestScreenCaptureAccess = None  # type: ignore
+
+AXIsProcessTrustedWithOptions = None  # type: ignore
+AXIsProcessTrusted = None  # type: ignore
+AXUIElementCopyAttributeValue = None  # type: ignore
+AXUIElementCreateApplication = None  # type: ignore
+AXUIElementPerformAction = None  # type: ignore
+AXUIElementSetAttributeValue = None  # type: ignore
+AXValueCreate = None  # type: ignore
+
+kAXTrustedCheckOptionPrompt = None  # type: ignore
+kAXMinimizedAttribute = None  # type: ignore
+kAXPositionAttribute = None  # type: ignore
+kAXSizeAttribute = None  # type: ignore
+kAXTitleAttribute = None  # type: ignore
+kAXWindowsAttribute = None  # type: ignore
+kAXRaiseAction = None  # type: ignore
+kAXCloseButtonAttribute = None  # type: ignore
+kAXPressAction = None  # type: ignore
+kAXWindowNumberAttribute = None  # type: ignore
+
+_cf_string_cache: Dict[str, c_void_p] = {}
+
+
+class CGPoint(ctypes.Structure):
+    """CGPoint struct for Core Graphics calls."""
+
+    _fields_ = [("x", c_double), ("y", c_double)]
+
+
+class CGSize(ctypes.Structure):
+    """CGSize struct for Core Graphics calls."""
+
+    _fields_ = [("width", c_double), ("height", c_double)]
+
+
+class CGRect(ctypes.Structure):
+    """CGRect struct for Core Graphics calls."""
+
+    _fields_ = [("origin", CGPoint), ("size", CGSize)]
+
+
+def _load_symbol(lib, name: str, restype=None, argtypes=None):
+    try:
+        func = getattr(lib, name)
+    except AttributeError:
+        return None
+    if restype is not None:
+        func.restype = restype
+    if argtypes is not None:
+        func.argtypes = argtypes
+    return func
+
+
+def _safe_cf_release(obj: Optional[int]) -> None:
+    if obj and CFRelease:
+        try:
+            CFRelease(obj)
+        except Exception:
+            pass
+
+
+def _cfstring(value: str) -> c_void_p:
+    cached = _cf_string_cache.get(value)
+    if cached:
+        return cached
+    new_value = CFStringCreateWithCString(None, value.encode("utf-8"), kCFStringEncodingUTF8)
+    _cf_string_cache[value] = new_value
+    return new_value
+
+
+def _cfstring_to_py(cf_string: Optional[int]) -> str:
+    if not cf_string:
+        return ""
+    length = CFStringGetLength(cf_string)
+    max_size = CFStringGetMaximumSizeForEncoding(length, kCFStringEncodingUTF8) + 1
+    buffer = ctypes.create_string_buffer(max_size)
+    success = CFStringGetCString(cf_string, buffer, max_size, kCFStringEncodingUTF8)
+    return buffer.value.decode("utf-8", errors="ignore") if success else ""
+
+
+def _cfnumber_to_int(cf_number: Optional[int]) -> Optional[int]:
+    if not cf_number:
+        return None
+    value = c_longlong()
+    success = CFNumberGetValue(cf_number, kCFNumberSInt64Type, ctypes.byref(value))
+    return int(value.value) if success else None
+
+
+def _cfarray_to_plist(cf_array: Optional[int]):
+    if not cf_array:
+        return None
+    data = CFPropertyListCreateData(None, cf_array, kCFPropertyListBinaryFormat_v1_0, 0, None)
+    if not data:
+        return None
+    try:
+        length = CFDataGetLength(data)
+        ptr = CFDataGetBytePtr(data)
+        if not ptr or length <= 0:
+            return None
+        raw = ctypes.string_at(ptr, length)
+        return plistlib.loads(raw)
+    finally:
+        _safe_cf_release(data)
+
+
+def _cfarray_to_ax_list(cf_array: Optional[int]) -> List[int]:
+    if not cf_array:
+        return []
+    count = CFArrayGetCount(cf_array)
+    items: List[int] = []
+    for idx in range(count):
+        item = CFArrayGetValueAtIndex(cf_array, idx)
+        if item:
+            if CFRetain:
+                CFRetain(item)
+            items.append(int(item))
+    _safe_cf_release(cf_array)
+    return items
+
+
+def _init_mac_apis() -> None:
+    """Bind minimal macOS APIs via ctypes for faster startup."""
+    global CF, CG, AS
+    global CFRelease, CFRetain, CFDictionaryCreate, CFStringCreateWithCString
+    global CFStringGetCString, CFStringGetLength, CFStringGetMaximumSizeForEncoding
+    global CFNumberGetValue, CFPropertyListCreateData, CFDataGetLength, CFDataGetBytePtr
+    global CFArrayGetCount, CFArrayGetValueAtIndex, kCFBooleanTrue, kCFBooleanFalse
+    global CGWindowListCopyWindowInfo, CGGetActiveDisplayList, CGDisplayBounds, CGMainDisplayID
+    global CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess
+    global AXIsProcessTrustedWithOptions, AXIsProcessTrusted, AXUIElementCopyAttributeValue
+    global AXUIElementCreateApplication, AXUIElementPerformAction, AXUIElementSetAttributeValue
+    global AXValueCreate
+    global kAXTrustedCheckOptionPrompt, kAXMinimizedAttribute, kAXPositionAttribute
+    global kAXSizeAttribute, kAXTitleAttribute, kAXWindowsAttribute, kAXRaiseAction
+    global kAXCloseButtonAttribute, kAXPressAction, kAXWindowNumberAttribute
+
+    if CF and CG and AS:
+        return
+
+    cf_path = ctypes.util.find_library("CoreFoundation") or "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+    CF = ctypes.CDLL(cf_path, use_errno=True)
+
+    CFRelease = _load_symbol(CF, "CFRelease", restype=None, argtypes=[c_void_p])
+    CFRetain = _load_symbol(CF, "CFRetain", restype=c_void_p, argtypes=[c_void_p])
+    CFDictionaryCreate = _load_symbol(
+        CF,
+        "CFDictionaryCreate",
+        restype=c_void_p,
+        argtypes=[c_void_p, ctypes.POINTER(c_void_p), ctypes.POINTER(c_void_p), c_long, c_void_p, c_void_p],
+    )
+    CFStringCreateWithCString = _load_symbol(
+        CF, "CFStringCreateWithCString", restype=c_void_p, argtypes=[c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+    )
+    CFStringGetCString = _load_symbol(
+        CF, "CFStringGetCString", restype=c_bool, argtypes=[c_void_p, ctypes.c_char_p, c_long, ctypes.c_uint32]
+    )
+    CFStringGetLength = _load_symbol(CF, "CFStringGetLength", restype=c_long, argtypes=[c_void_p])
+    CFStringGetMaximumSizeForEncoding = _load_symbol(
+        CF, "CFStringGetMaximumSizeForEncoding", restype=c_long, argtypes=[c_long, ctypes.c_uint32]
+    )
+    CFNumberGetValue = _load_symbol(CF, "CFNumberGetValue", restype=c_bool, argtypes=[c_void_p, ctypes.c_int, c_void_p])
+    CFPropertyListCreateData = _load_symbol(
+        CF, "CFPropertyListCreateData", restype=c_void_p, argtypes=[c_void_p, c_void_p, ctypes.c_uint32, ctypes.c_uint32, c_void_p]
+    )
+    CFDataGetLength = _load_symbol(CF, "CFDataGetLength", restype=c_long, argtypes=[c_void_p])
+    CFDataGetBytePtr = _load_symbol(CF, "CFDataGetBytePtr", restype=ctypes.POINTER(ctypes.c_ubyte), argtypes=[c_void_p])
+    CFArrayGetCount = _load_symbol(CF, "CFArrayGetCount", restype=c_long, argtypes=[c_void_p])
+    CFArrayGetValueAtIndex = _load_symbol(CF, "CFArrayGetValueAtIndex", restype=c_void_p, argtypes=[c_void_p, c_long])
+
+    kCFBooleanTrue = c_void_p.in_dll(CF, "kCFBooleanTrue")
+    kCFBooleanFalse = c_void_p.in_dll(CF, "kCFBooleanFalse")
+
+    cg_path = ctypes.util.find_library("CoreGraphics") or "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics"
+    CG = ctypes.CDLL(cg_path, use_errno=True)
+    CGWindowListCopyWindowInfo = _load_symbol(
+        CG, "CGWindowListCopyWindowInfo", restype=c_void_p, argtypes=[c_uint32, c_uint32]
+    )
+    CGGetActiveDisplayList = _load_symbol(
+        CG, "CGGetActiveDisplayList", restype=c_int32, argtypes=[c_uint32, ctypes.POINTER(c_uint32), ctypes.POINTER(c_uint32)]
+    )
+    CGDisplayBounds = _load_symbol(CG, "CGDisplayBounds", restype=CGRect, argtypes=[c_uint32])
+    CGMainDisplayID = _load_symbol(CG, "CGMainDisplayID", restype=c_uint32, argtypes=None)
+    CGPreflightScreenCaptureAccess = _load_symbol(CG, "CGPreflightScreenCaptureAccess", restype=c_bool, argtypes=None)
+    CGRequestScreenCaptureAccess = _load_symbol(CG, "CGRequestScreenCaptureAccess", restype=c_bool, argtypes=None)
+
+    as_path = ctypes.util.find_library("ApplicationServices") or "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
+    AS = ctypes.CDLL(as_path, use_errno=True)
+    AXIsProcessTrustedWithOptions = _load_symbol(AS, "AXIsProcessTrustedWithOptions", restype=c_bool, argtypes=[c_void_p])
+    AXIsProcessTrusted = _load_symbol(AS, "AXIsProcessTrusted", restype=c_bool, argtypes=None)
+    AXUIElementCopyAttributeValue = _load_symbol(
+        AS, "AXUIElementCopyAttributeValue", restype=c_int32, argtypes=[c_void_p, c_void_p, ctypes.POINTER(c_void_p)]
+    )
+    AXUIElementCreateApplication = _load_symbol(AS, "AXUIElementCreateApplication", restype=c_void_p, argtypes=[ctypes.c_int])
+    AXUIElementPerformAction = _load_symbol(AS, "AXUIElementPerformAction", restype=c_int32, argtypes=[c_void_p, c_void_p])
+    AXUIElementSetAttributeValue = _load_symbol(AS, "AXUIElementSetAttributeValue", restype=c_int32, argtypes=[c_void_p, c_void_p, c_void_p])
+    AXValueCreate = _load_symbol(AS, "AXValueCreate", restype=c_void_p, argtypes=[ctypes.c_int, c_void_p])
+
+    kAXTrustedCheckOptionPrompt = _cfstring("AXTrustedCheckOptionPrompt")
+    kAXMinimizedAttribute = _cfstring("AXMinimized")
+    kAXPositionAttribute = _cfstring("AXPosition")
+    kAXSizeAttribute = _cfstring("AXSize")
+    kAXTitleAttribute = _cfstring("AXTitle")
+    kAXWindowsAttribute = _cfstring("AXWindows")
+    kAXRaiseAction = _cfstring("AXRaise")
+    kAXCloseButtonAttribute = _cfstring("AXCloseButton")
+    kAXPressAction = _cfstring("AXPress")
+    kAXWindowNumberAttribute = _cfstring("AXWindowNumber")
 
 
 class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
     """macOS-specific window management implementation."""
+
     def __init__(self) -> None:
-        self._ensure_accessibility_permissions()
-        self._screen_recording_checked = False
-        self._ensure_screen_recording_permissions()
-        main_screen = NSScreen.mainScreen()
-        self._main_screen_height = (
-            int(main_screen.frame().size.height) if main_screen else 0
-        )
+        _init_mac_apis()
+
         self._restore_bounds: Dict[str, Tuple[int, int, int, int]] = {}
         self._warned_screen_recording = False
         self._ax_missing_window_ids: set[str] = set()
+        self._window_cache: List[Window] = []
+        self._window_by_id: Dict[str, Window] = {}
+        self._ax_windows_by_pid: Dict[int, List[int]] = {}
+        self._cache_valid = False
+        self._screen_recording_checked = False
+        self._ensure_accessibility_permissions()
+        self._ensure_screen_recording_permissions()
 
     def _ensure_accessibility_permissions(self) -> None:
-        # Prompt the user automatically if access has not been granted.
-        options = {kAXTrustedCheckOptionPrompt: True} if kAXTrustedCheckOptionPrompt else None
-        trusted = (
-            AXIsProcessTrustedWithOptions(options)
-            if options is not None
-            else getattr(AS, "AXIsProcessTrusted", lambda: False)()
-        )
+        options = None
+        if AXIsProcessTrustedWithOptions and kAXTrustedCheckOptionPrompt and CFDictionaryCreate:
+            keys = (c_void_p * 1)(kAXTrustedCheckOptionPrompt)
+            values = (c_void_p * 1)(kCFBooleanTrue)
+            options = CFDictionaryCreate(None, keys, values, 1, None, None)
+
+        try:
+            trusted = AXIsProcessTrustedWithOptions(options) if AXIsProcessTrustedWithOptions else False
+            if not trusted and AXIsProcessTrusted:
+                trusted = AXIsProcessTrusted()
+        finally:
+            _safe_cf_release(options)
+
         if not trusted:
             raise PermissionError(
                 "Janela requires Accessibility access. Grant permission in "
@@ -76,23 +328,19 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
             return
         self._screen_recording_checked = True
 
-        preflight = getattr(CG, "CGPreflightScreenCaptureAccess", None)
-        request = getattr(CG, "CGRequestScreenCaptureAccess", None)
         try:
-            if preflight and preflight():
+            if CGPreflightScreenCaptureAccess and CGPreflightScreenCaptureAccess():
                 return
         except Exception:
             pass
 
-        if request:
+        if CGRequestScreenCaptureAccess:
             try:
-                granted = request()
-                if granted:
+                if CGRequestScreenCaptureAccess():
                     return
             except Exception:
                 pass
 
-        # Fallback: open the Screen Recording preference pane for the user.
         self._open_screen_recording_settings()
 
     def _open_screen_recording_settings(self) -> None:
@@ -111,113 +359,180 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
                 "System Settings → Privacy & Security → Screen Recording."
             )
 
-    def _to_cg_y(self, screen_y: int, screen_height: int) -> int:
-        # Convert NSScreen (origin bottom-left) to CG window coordinates
-        # (origin top-left of main display)
-        return self._main_screen_height - (screen_y + screen_height)
+    def _clear_ax_windows_cache(self) -> None:
+        for windows in self._ax_windows_by_pid.values():
+            for win_ref in windows:
+                _safe_cf_release(win_ref)
+        self._ax_windows_by_pid = {}
+
+    def _get_window_list(self, options: int) -> List[dict]:
+        if not CGWindowListCopyWindowInfo:
+            return []
+        window_array = CGWindowListCopyWindowInfo(options, kCGNullWindowID)
+        if not window_array:
+            return []
+        try:
+            plist_obj = _cfarray_to_plist(window_array)
+            if isinstance(plist_obj, list):
+                return plist_obj
+            return []
+        finally:
+            _safe_cf_release(window_array)
 
     def get_monitors(self) -> List[Monitor]:
+        count = c_uint32(0)
         monitors: List[Monitor] = []
-        for screen in NSScreen.screens():
-            frame = screen.frame()
+        if not CGGetActiveDisplayList:
+            return monitors
+
+        CGGetActiveDisplayList(0, None, ctypes.byref(count))
+        if count.value == 0:
+            return monitors
+
+        display_ids = (c_uint32 * count.value)()
+        CGGetActiveDisplayList(count.value, display_ids, ctypes.byref(count))
+
+        for display_id in display_ids[: count.value]:
+            if not CGDisplayBounds:
+                continue
+            bounds = CGDisplayBounds(display_id)
             monitor = Monitor(
                 wm=self,
-                id=screen.deviceDescription()["NSScreenNumber"],
-                name=screen.localizedName(),
-                width=int(frame.size.width),
-                height=int(frame.size.height),
-                x=int(frame.origin.x),
-                y=self._to_cg_y(int(frame.origin.y), int(frame.size.height)),
+                id=int(display_id),
+                name=f"Display {display_id}",
+                width=int(bounds.size.width),
+                height=int(bounds.size.height),
+                x=int(bounds.origin.x),
+                y=int(bounds.origin.y),
             )
             monitors.append(monitor)
         return monitors
 
-    def get_active_window_id(self) -> str:
-        window_info = NSWorkspace.sharedWorkspace().frontmostApplication()
-        pid = window_info.processIdentifier()
-        window_list = CGWindowListCopyWindowInfo(
-            kCGWindowListOptionOnScreenOnly, kCGNullWindowID
-        )
-        for window in window_list:
-            if window.get("kCGWindowOwnerPID") == pid:
-                return str(window["kCGWindowNumber"])
+    def _active_window_from_list(self, window_list: List[dict]) -> str:
+        for win in window_list:
+            if win.get("kCGWindowLayer", 0) == 0:
+                return str(win.get("kCGWindowNumber", "")) or ""
         return ""
 
-    def _copy_attribute(self, element, attribute):
+    def get_active_window_id(self) -> str:
+        window_list = self._get_window_list(kCGWindowListOptionOnScreenOnly)
+        return self._active_window_from_list(window_list)
+
+    def _copy_attribute(self, element: c_void_p, attribute: c_void_p) -> Tuple[int, Optional[int]]:
+        if not element:
+            return -1, None
+        value = c_void_p()
+        err = AXUIElementCopyAttributeValue(element, attribute, ctypes.byref(value))
+        return err, value.value
+
+    def _get_ax_windows_for_pid(self, pid: int) -> List[int]:
+        if pid in self._ax_windows_by_pid:
+            return self._ax_windows_by_pid[pid]
+
+        app_ref = AXUIElementCreateApplication(pid) if AXUIElementCreateApplication else None
+        if not app_ref:
+            self._ax_windows_by_pid[pid] = []
+            return []
         try:
-            result = AXUIElementCopyAttributeValue(element, attribute, None)
-            if isinstance(result, tuple):
-                return result
-            # Some PyObjC versions return value directly
-            return kAXErrorSuccess, result
-        except TypeError:
-            # Older signature without third argument
-            result = AXUIElementCopyAttributeValue(element, attribute)
-            if isinstance(result, tuple):
-                return result
-            return kAXErrorSuccess, result
+            err, ax_windows = self._copy_attribute(app_ref, kAXWindowsAttribute)
+            if err == kAXErrorSuccess and ax_windows:
+                windows = _cfarray_to_ax_list(ax_windows)
+                self._ax_windows_by_pid[pid] = windows
+                return windows
+        finally:
+            _safe_cf_release(app_ref)
+
+        self._ax_windows_by_pid[pid] = []
+        return []
+
+    def _get_ax_window_numbers_for_pid(self, pid: int) -> set[int]:
+        """Return window numbers exposed via AX for a process."""
+        numbers: set[int] = set()
+        for ax_ref in self._get_ax_windows_for_pid(pid):
+            err, win_id_ref = self._copy_attribute(ax_ref, kAXWindowNumberAttribute)
+            try:
+                if err == kAXErrorSuccess and win_id_ref:
+                    win_id = _cfnumber_to_int(win_id_ref)
+                    if win_id is not None:
+                        numbers.add(win_id)
+            finally:
+                _safe_cf_release(win_id_ref)
+        return numbers
 
     def _find_ax_window(self, window: Window, log_missing: bool = True):
         if window.pid is None:
             return None
 
-        app_ref = AXUIElementCreateApplication(window.pid)
-        err, ax_windows = self._copy_attribute(app_ref, kAXWindowsAttribute)
-        if err != kAXErrorSuccess or not ax_windows:
+        ax_windows = self._get_ax_windows_for_pid(window.pid)
+        if not ax_windows:
             if log_missing and window.id not in self._ax_missing_window_ids:
                 logger.warning(f"Unable to fetch AX windows for pid {window.pid}")
                 self._ax_missing_window_ids.add(window.id)
             return None
 
         target_id = int(window.id)
-        for ax_win in ax_windows:
-            err, win_id = self._copy_attribute(ax_win, "AXWindowNumber")
-            if err == kAXErrorSuccess:
-                try:
-                    if int(win_id) == target_id:
-                        return ax_win
-                except Exception:
-                    pass
+        for ax_ref in ax_windows:
+            err, win_id_ref = self._copy_attribute(ax_ref, kAXWindowNumberAttribute)
+            try:
+                if err == kAXErrorSuccess and win_id_ref:
+                    win_id = _cfnumber_to_int(win_id_ref)
+                    if win_id is not None and win_id == target_id:
+                        return c_void_p(ax_ref)
+            finally:
+                _safe_cf_release(win_id_ref)
 
-        # Fallback by title match if window number lookup fails
-        for ax_win in ax_windows:
-            err, title = self._copy_attribute(ax_win, kAXTitleAttribute)
-            if err == kAXErrorSuccess and isinstance(title, str):
-                title_lower = title.lower()
-                target_lower = (window.name or "").lower()
-                if (
-                    title_lower == target_lower
-                    or target_lower in title_lower
-                    or title_lower in target_lower
-                ):
-                    return ax_win
-        # Fallback: use the first AX window if nothing matched.
+        for ax_ref in ax_windows:
+            err, title_ref = self._copy_attribute(ax_ref, kAXTitleAttribute)
+            try:
+                if err == kAXErrorSuccess and title_ref:
+                    title_lower = _cfstring_to_py(title_ref).lower()
+                    target_lower = (window.name or "").lower()
+                    if (
+                        title_lower == target_lower
+                        or target_lower in title_lower
+                        or title_lower in target_lower
+                    ):
+                        return c_void_p(ax_ref)
+            finally:
+                _safe_cf_release(title_ref)
+
         if ax_windows:
-            return ax_windows[0]
-
+            return c_void_p(ax_windows[0])
         return None
 
-    def _set_window_position(self, ax_window, x: int, y: int) -> bool:
-        if not kAXValueCGPointType:
+    def _set_window_position(self, ax_window: c_void_p, x: int, y: int) -> bool:
+        point = CGPoint(x, y)
+        pos_value = AXValueCreate(kAXValueCGPointType, ctypes.byref(point)) if AXValueCreate else None
+        if not pos_value:
             logger.error("Accessibility CGPoint type missing; cannot move window")
             return False
-        pos_value = AXValueCreate(kAXValueCGPointType, (x, y))
-        err = AXUIElementSetAttributeValue(ax_window, kAXPositionAttribute, pos_value)
-        return err == kAXErrorSuccess
+        try:
+            err = AXUIElementSetAttributeValue(ax_window, kAXPositionAttribute, pos_value)
+            return err == kAXErrorSuccess
+        finally:
+            _safe_cf_release(pos_value)
 
-    def _set_window_size(self, ax_window, width: int, height: int) -> bool:
-        if not kAXValueCGSizeType:
+    def _set_window_size(self, ax_window: c_void_p, width: int, height: int) -> bool:
+        size = CGSize(width, height)
+        size_value = AXValueCreate(kAXValueCGSizeType, ctypes.byref(size)) if AXValueCreate else None
+        if not size_value:
             logger.error("Accessibility CGSize type missing; cannot resize window")
             return False
-        size_value = AXValueCreate(kAXValueCGSizeType, (width, height))
-        err = AXUIElementSetAttributeValue(ax_window, kAXSizeAttribute, size_value)
-        return err == kAXErrorSuccess
+        try:
+            err = AXUIElementSetAttributeValue(ax_window, kAXSizeAttribute, size_value)
+            return err == kAXErrorSuccess
+        finally:
+            _safe_cf_release(size_value)
 
     def list_windows(self) -> List[Window]:
-        windows: List[Window] = []
-        window_list = CGWindowListCopyWindowInfo(
-            kCGWindowListOptionAll, kCGNullWindowID
-        )
+        if self._cache_valid:
+            return list(self._window_cache)
+
+        self._window_cache = []
+        self._window_by_id = {}
+        self._clear_ax_windows_cache()
+
+        window_list = self._get_window_list(kCGWindowListOptionAll)
         if not window_list and not self._warned_screen_recording:
             logger.warning(
                 "No windows found. macOS may require Screen Recording permission "
@@ -227,7 +542,15 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
             self._open_screen_recording_settings()
             self._warned_screen_recording = True
 
-        active_id = self.get_active_window_id()
+        # Precompute AX-backed window numbers per PID to drop non-window CG entries (e.g., tabs).
+        ax_window_numbers_by_pid: Dict[int, set[int]] = {}
+        pids = {int(w.get("kCGWindowOwnerPID")) for w in window_list if w.get("kCGWindowOwnerPID") is not None}
+        for pid in pids:
+            numbers = self._get_ax_window_numbers_for_pid(pid)
+            if numbers:
+                ax_window_numbers_by_pid[pid] = numbers
+
+        active_id = self._active_window_from_list(window_list)
         for win in window_list:
             if win.get("kCGWindowLayer", 0) != 0:
                 continue
@@ -237,25 +560,77 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
             if not owner_name or not window_name:
                 continue
 
-            bounds = win.get("kCGWindowBounds", {})
-            window_id = str(win["kCGWindowNumber"])
-            windows.append(
-                Window(
-                    wm=self,
-                    id=window_id,
-                    name=window_name or owner_name,
-                    x=int(bounds.get("X", 0)),
-                    y=int(bounds.get("Y", 0)),
-                    width=int(bounds.get("Width", 0)),
-                    height=int(bounds.get("Height", 0)),
-                    is_active=window_id == active_id,
-                    pid=win.get("kCGWindowOwnerPID"),
-                )
+            bounds = win.get("kCGWindowBounds", {}) or {}
+            window_number = win.get("kCGWindowNumber")
+            pid_val = win.get("kCGWindowOwnerPID")
+            if window_number is None or pid_val is None:
+                continue
+            pid_int = int(pid_val)
+            allowed_numbers = ax_window_numbers_by_pid.get(pid_int)
+            if allowed_numbers is not None and int(window_number) not in allowed_numbers:
+                continue
+
+            window_id = str(win.get("kCGWindowNumber"))
+            pid = win.get("kCGWindowOwnerPID")
+            if window_id in self._window_by_id:
+                continue
+            window_obj = Window(
+                wm=self,
+                id=window_id,
+                name=window_name or owner_name,
+                x=int(bounds.get("X", 0)),
+                y=int(bounds.get("Y", 0)),
+                width=int(bounds.get("Width", 0)),
+                height=int(bounds.get("Height", 0)),
+                is_active=window_id == active_id,
+                pid=int(pid) if pid is not None else None,
             )
+            self._window_cache.append(window_obj)
+            self._window_by_id[window_id] = window_obj
+
+        # Drop auxiliary surfaces (e.g., tab strips) when a PID has a much larger main window.
+        pruned: List[Window] = []
+        by_pid: Dict[int, List[Window]] = {}
+        for w in self._window_cache:
+            if w.pid is not None:
+                by_pid.setdefault(w.pid, []).append(w)
+            else:
+                pruned.append(w)
+
+        deduped: List[Window] = []
+        for pid, wins in by_pid.items():
+            if len(wins) == 1:
+                pruned.extend(wins)
+                continue
+            max_area = max(w.width * w.height for w in wins)
+            filtered: List[Window] = []
+            for w in wins:
+                area = w.width * w.height
+                if max_area > 0 and area < max_area * 0.6 and w.height < 150:
+                    continue
+                filtered.append(w)
+
+            # Deduplicate near-identical overlaps (e.g., terminal tabs).
+            filtered = sorted(
+                filtered,
+                key=lambda w: (
+                    0 if w.is_active else 1,
+                    -(w.width * w.height),
+                ),
+            )
+            kept: List[Window] = []
+            for w in filtered:
+                if any(_windows_overlap(w, k) for k in kept):
+                    continue
+                kept.append(w)
+            deduped.extend(kept)
+
+        self._window_cache = pruned + deduped
+        self._window_by_id = {w.id: w for w in self._window_cache}
 
         if (
-            windows
-            and all(w.pid == os.getpid() for w in windows)
+            self._window_cache
+            and all(w.pid == os.getpid() for w in self._window_cache)
             and not self._warned_screen_recording
         ):
             logger.warning(
@@ -265,7 +640,28 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
             )
             self._open_screen_recording_settings()
             self._warned_screen_recording = True
-        return windows
+
+        self._cache_valid = True
+        return list(self._window_cache)
+
+    def _update_cached_window(
+        self, window: Window, position: Optional[Tuple[int, int]] = None, size: Optional[Tuple[int, int]] = None
+    ) -> None:
+        cached = self._window_by_id.get(window.id)
+        if not cached:
+            return
+        if position is not None:
+            x_val, y_val = position
+            cached.x = x_val
+            cached.y = y_val
+            window.x = x_val
+            window.y = y_val
+        if size is not None:
+            width_val, height_val = size
+            cached.width = width_val
+            cached.height = height_val
+            window.width = width_val
+            window.height = height_val
 
     def get_monitor_for_window(self, window: Window) -> Optional[Monitor]:
         monitors = self.get_monitors()
@@ -283,7 +679,7 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
             logger.error(f"Could not find AX window for '{window.name}'")
             return
         if self._set_window_position(ax_window, x, y):
-            window.x, window.y = x, y
+            self._update_cached_window(window, position=(x, y))
         else:
             logger.error(f"Failed to move window '{window.name}' to ({x}, {y})")
 
@@ -293,7 +689,7 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
             logger.error(f"Could not find AX window for '{window.name}'")
             return
         if self._set_window_size(ax_window, width, height):
-            window.width, window.height = width, height
+            self._update_cached_window(window, size=(width, height))
         else:
             logger.error(f"Failed to resize window '{window.name}' to ({width}, {height})")
 
@@ -302,22 +698,21 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
         if not ax_window:
             logger.error(f"Could not find AX window for '{window.name}'")
             return
-        err = AXUIElementSetAttributeValue(ax_window, kAXMinimizedAttribute, True)
+        err = AXUIElementSetAttributeValue(ax_window, kAXMinimizedAttribute, kCFBooleanTrue)
         if err != kAXErrorSuccess:
             logger.error(f"Failed to minimize window '{window.name}'")
 
     def maximize_window(self, window: Window):
         monitor = self.get_monitor_for_window(window)
         if monitor:
-            # Track prior bounds so we can restore later.
             self._restore_bounds[window.id] = (
                 window.x,
                 window.y,
                 window.width,
                 window.height,
             )
-            self.move_window_to_position(window, monitor.x, monitor.y)
             self.resize_window(window, monitor.width, monitor.height)
+            self.move_window_to_position(window, monitor.x, monitor.y)
 
     def move_to_monitor(self, window: Window, monitor: Monitor):
         target_x = monitor.x + (monitor.width - window.width) // 2
@@ -337,52 +732,39 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
         )
 
     def get_window_by_id(self, window_id: str) -> Optional[Window]:
-        window_list = CGWindowListCopyWindowInfo(
-            kCGWindowListOptionAll, kCGNullWindowID
-        )
-        active_id = self.get_active_window_id()
-        for win in window_list:
-            if str(win.get("kCGWindowNumber")) != window_id:
-                continue
-            owner_name = win.get("kCGWindowOwnerName", "")
-            window_name = win.get("kCGWindowName", "")
-            bounds = win.get("kCGWindowBounds", {})
-            return Window(
-                id=str(win["kCGWindowNumber"]),
-                name=window_name or owner_name,
-                x=int(bounds.get("X", 0)),
-                y=int(bounds.get("Y", 0)),
-                width=int(bounds.get("Width", 0)),
-                height=int(bounds.get("Height", 0)),
-                wm=self,
-                is_active=window_id == active_id,
-                pid=win.get("kCGWindowOwnerPID"),
-            )
+        if not self._cache_valid:
+            self.list_windows()
+        cached = self._window_by_id.get(window_id)
+        if cached:
+            return cached
         return None
 
     def focus_window(self, window: Window):
-        if window.pid is None:
-            logger.error(f"Cannot focus window '{window.name}' without PID")
+        ax_window = self._find_ax_window(window)
+        if not ax_window:
+            logger.error(f"Could not find AX window for '{window.name}'")
             return
-        app = NSRunningApplication.runningApplicationWithProcessIdentifier_(window.pid)
-        if app:
-            app.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
+        err = AXUIElementPerformAction(ax_window, kAXRaiseAction)
+        if err == kAXErrorSuccess:
             window.is_active = True
         else:
-            logger.error(f"Failed to focus window '{window.name}' (pid {window.pid})")
+            logger.error(f"Failed to focus window '{window.name}'")
 
     def close_window(self, window: Window):
         ax_window = self._find_ax_window(window)
         if not ax_window:
             logger.error(f"Could not find AX window for '{window.name}'")
             return
-        err, close_button = self._copy_attribute(ax_window, "AXCloseButton")
-        if err == kAXErrorSuccess and close_button:
-            press_err = AXUIElementPerformAction(close_button, "AXPress")
-            if press_err != kAXErrorSuccess:
-                logger.error(f"Failed to close window '{window.name}' via close button")
-        else:
-            logger.error(f"No close button available for '{window.name}'")
+        err, close_button = self._copy_attribute(ax_window, kAXCloseButtonAttribute)
+        try:
+            if err == kAXErrorSuccess and close_button:
+                press_err = AXUIElementPerformAction(close_button, kAXPressAction)
+                if press_err != kAXErrorSuccess:
+                    logger.error(f"Failed to close window '{window.name}' via close button")
+            else:
+                logger.error(f"No close button available for '{window.name}'")
+        finally:
+            _safe_cf_release(close_button)
 
     def list_monitors(self) -> List[Monitor]:
         return sorted(self.get_monitors(), key=lambda m: m.name)
@@ -426,7 +808,6 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
             self.move_window_to_position(window, x, y)
             self.resize_window(window, width, height)
             return
-        # Fallback size if we do not know the original bounds
         self.resize_window(window, max(800, window.width // 2), max(600, window.height // 2))
 
     def can_control_window(self, window: Window) -> bool:

@@ -40,6 +40,8 @@ def mosaic(ja: Janela):
 
             # Sort windows alphabetically, handle cases where window name might be None
             windows = sorted(windows, key=lambda w: (w.name or "").lower())
+            for idx, window in enumerate(windows, start=1):
+                logger.info("Window %d on monitor '%s': %s", idx, monitor.name, window.name)
 
             logger.debug("Processing %d windows on monitor '%s'.", len(windows), monitor.name)
 
