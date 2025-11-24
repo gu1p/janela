@@ -8,6 +8,8 @@ import ctypes.util
 import os
 import plistlib
 import subprocess
+import time
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 from janela.interfaces import Janela
@@ -52,6 +54,19 @@ def _windows_overlap(a: Window, b: Window, threshold: float = 0.9) -> bool:
     inter_area = inter_w * inter_h
     min_area = min(a.width * a.height, b.width * b.height)
     return min_area > 0 and inter_area >= min_area * threshold
+
+
+def _window_summary(win: Window, members: Optional[List[str]] = None) -> str:
+    names = members if members is not None else [win.name]
+    names_text = ", ".join(names)
+    return f"{win.id}:[{names_text}] ({win.width}x{win.height}@{win.x},{win.y})"
+
+
+@dataclass
+class _WindowRecord:
+    window: Window
+    bounds: Tuple[int, int, int, int]
+    members: List[str]
 
 # Populated at runtime by _init_mac_apis
 CFRelease = None  # type: ignore
@@ -300,8 +315,12 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
         self._ax_windows_by_pid: Dict[int, List[int]] = {}
         self._cache_valid = False
         self._screen_recording_checked = False
+        self._max_display_extent: Optional[int] = None
         self._ensure_accessibility_permissions()
         self._ensure_screen_recording_permissions()
+
+    def _invalidate_cache(self) -> None:
+        self._cache_valid = False
 
     def _ensure_accessibility_permissions(self) -> None:
         options = None
@@ -392,10 +411,12 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
         display_ids = (c_uint32 * count.value)()
         CGGetActiveDisplayList(count.value, display_ids, ctypes.byref(count))
 
+        max_extent = 0
         for display_id in display_ids[: count.value]:
             if not CGDisplayBounds:
                 continue
             bounds = CGDisplayBounds(display_id)
+            max_extent = max(max_extent, int(bounds.origin.y + bounds.size.height))
             monitor = Monitor(
                 wm=self,
                 id=int(display_id),
@@ -406,6 +427,8 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
                 y=int(bounds.origin.y),
             )
             monitors.append(monitor)
+        if max_extent > 0:
+            self._max_display_extent = max_extent
         return monitors
 
     def _active_window_from_list(self, window_list: List[dict]) -> str:
@@ -524,10 +547,179 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
         finally:
             _safe_cf_release(size_value)
 
-    def list_windows(self) -> List[Window]:
-        if self._cache_valid:
-            return list(self._window_cache)
+    def _ax_position_for(self, _window: Window, x: int, y: int, _height: Optional[int] = None) -> Tuple[int, int]:
+        """macOS AX appears to accept CG-style bottom-left coords; keep identity."""
+        return x, y
 
+    def _clamp_to_monitor(
+        self,
+        window: Window,
+        x: int,
+        y: int,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+    ) -> Tuple[int, int]:
+        monitor = self.get_monitor_for_window(window)
+        if not monitor:
+            return x, y
+        w = width if width is not None else window.width
+        h = height if height is not None else window.height
+        min_x = monitor.x
+        min_y = monitor.y
+        max_x = monitor.x + monitor.width - w
+        max_y = monitor.y + monitor.height - h
+        clamped_x = min(max(x, min_x), max_x)
+        clamped_y = min(max(y, min_y), max_y)
+        return clamped_x, clamped_y
+
+    def _get_pid_bounds(self, pid: int) -> Dict[str, Tuple[int, int, int, int]]:
+        """Return current CG bounds for a PID keyed by window id."""
+        result: Dict[str, Tuple[int, int, int, int]] = {}
+        for win in self._get_window_list(kCGWindowListOptionAll):
+            if win.get("kCGWindowOwnerPID") != pid:
+                continue
+            wid = win.get("kCGWindowNumber")
+            bounds = win.get("kCGWindowBounds", {}) or {}
+            if wid is None:
+                continue
+            result[str(wid)] = (
+                int(bounds.get("X", 0)),
+                int(bounds.get("Y", 0)),
+                int(bounds.get("Width", 0)),
+                int(bounds.get("Height", 0)),
+            )
+        return result
+
+    @staticmethod
+    def _merge_members(target: _WindowRecord, names: List[str]) -> None:
+        target.members = list(dict.fromkeys(target.members + names))
+
+    def _probe_coupled_records(
+        self,
+        pid: int,
+        primary: _WindowRecord,
+        others: List[_WindowRecord],
+    ) -> set[str]:
+        """Move the primary window slightly; any siblings that move with it are merged."""
+        if not others:
+            return set()
+        primary_pos = primary.bounds
+        ax_primary = self._find_ax_window(primary.window, log_missing=False)
+        if not ax_primary:
+            return set()
+
+        dx, dy = 80, 60
+        target_x = primary_pos[0] + dx
+        target_y = primary_pos[1] + dy
+        target_x, target_y = self._clamp_to_monitor(primary.window, target_x, target_y, primary.bounds[2], primary.bounds[3])
+        ax_x, ax_y = self._ax_position_for(primary.window, target_x, target_y, primary.bounds[3])
+        if not self._set_window_position(ax_primary, ax_x, ax_y):
+            logger.debug("Coupling probe: move failed for pid %s window %s", pid, primary.window.name)
+            return set()
+
+        time.sleep(0.1)
+        moved_bounds = self._get_pid_bounds(pid)
+
+        moved_primary = moved_bounds.get(primary.window.id)
+        if not moved_primary:
+            logger.debug("Coupling probe: primary bounds missing after move for pid %s", pid)
+            self._set_window_position(ax_primary, primary_pos[0], primary_pos[1])
+            return set()
+        delta_primary = (moved_primary[0] - primary_pos[0], moved_primary[1] - primary_pos[1])
+
+        coupled: set[str] = set()
+        tol = 10
+        for rec in others:
+            before = rec.bounds
+            after = moved_bounds.get(rec.window.id)
+            if not after:
+                continue
+            delta = (after[0] - before[0], after[1] - before[1])
+            if abs(delta[0] - delta_primary[0]) <= tol and abs(delta[1] - delta_primary[1]) <= tol:
+                coupled.add(rec.window.id)
+                self._merge_members(primary, rec.members)
+
+        orig_x, orig_y = self._clamp_to_monitor(primary.window, primary_pos[0], primary_pos[1], primary.bounds[2], primary.bounds[3])
+        orig_ax_x, orig_ax_y = self._ax_position_for(primary.window, orig_x, orig_y, primary.bounds[3])
+        self._set_window_position(ax_primary, orig_ax_x, orig_ax_y)
+        return coupled
+
+    def _ensure_display_extent(self) -> int:
+        if self._max_display_extent is None:
+            self.get_monitors()
+        return self._max_display_extent or 0
+
+    def _process_pid_records(self, pid: int, records: List[_WindowRecord]) -> List[_WindowRecord]:
+        if len(records) == 1:
+            return records
+
+        max_area = max(r.bounds[2] * r.bounds[3] for r in records)
+        primary = max(records, key=lambda r: r.bounds[2] * r.bounds[3])
+
+        filtered: List[_WindowRecord] = []
+        dropped_small: List[_WindowRecord] = []
+        for rec in records:
+            area = rec.bounds[2] * rec.bounds[3]
+            if max_area > 0 and area < max_area * 0.6 and rec.bounds[3] < 150:
+                dropped_small.append(rec)
+                self._merge_members(primary, rec.members)
+                continue
+            filtered.append(rec)
+        if not filtered:
+            filtered = [primary]
+
+        filtered = sorted(
+            filtered,
+            key=lambda r: (
+                0 if r.window.is_active else 1,
+                -(r.bounds[2] * r.bounds[3]),
+            ),
+        )
+
+        kept: List[_WindowRecord] = []
+        dropped_overlap: List[_WindowRecord] = []
+        for rec in filtered:
+            overlap_target = None
+            for k in kept:
+                if _windows_overlap(rec.window, k.window):
+                    overlap_target = k
+                    break
+            if overlap_target:
+                dropped_overlap.append(rec)
+                self._merge_members(overlap_target, rec.members)
+                continue
+            kept.append(rec)
+
+        if len(kept) > 1:
+            primary_rec = kept[0]
+            others = kept[1:]
+            coupled_ids = self._probe_coupled_records(pid, primary_rec, others)
+            if coupled_ids:
+                kept = [r for r in kept if r.window.id not in coupled_ids]
+
+        if len(kept) > 1:
+            proc_names = {getattr(r.window, "process_name", "").lower() for r in kept}
+            if len(proc_names) == 1 and next(iter(proc_names)) == "terminal":
+                primary_rec = kept[0]
+                for rec in kept[1:]:
+                    self._merge_members(primary_rec, rec.members)
+                kept = [primary_rec]
+
+        if dropped_small or dropped_overlap:
+            logger.info(
+                "PID %d dedupe: kept %d; dropped %d small, %d overlap. Kept windows: %s",
+                pid,
+                len(kept),
+                len(dropped_small),
+                len(dropped_overlap),
+                "; ".join(_window_summary(r.window, r.members) for r in kept),
+            )
+
+        for rec in kept:
+            rec.members = list(dict.fromkeys(rec.members))
+        return kept
+
+    def list_windows(self) -> List[Window]:
         self._window_cache = []
         self._window_by_id = {}
         self._clear_ax_windows_cache()
@@ -551,6 +743,8 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
                 ax_window_numbers_by_pid[pid] = numbers
 
         active_id = self._active_window_from_list(window_list)
+        records_by_pid: Dict[int, List[_WindowRecord]] = {}
+        no_pid_records: List[_WindowRecord] = []
         for win in window_list:
             if win.get("kCGWindowLayer", 0) != 0:
                 continue
@@ -574,59 +768,37 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
             pid = win.get("kCGWindowOwnerPID")
             if window_id in self._window_by_id:
                 continue
+            x_val = int(bounds.get("X", 0))
+            y_val = int(bounds.get("Y", 0))
+            w_val = int(bounds.get("Width", 0))
+            h_val = int(bounds.get("Height", 0))
             window_obj = Window(
                 wm=self,
                 id=window_id,
                 name=window_name or owner_name,
-                x=int(bounds.get("X", 0)),
-                y=int(bounds.get("Y", 0)),
-                width=int(bounds.get("Width", 0)),
-                height=int(bounds.get("Height", 0)),
+                x=x_val,
+                y=y_val,
+                width=w_val,
+                height=h_val,
                 is_active=window_id == active_id,
                 pid=int(pid) if pid is not None else None,
             )
-            self._window_cache.append(window_obj)
+            setattr(window_obj, "process_name", owner_name)
+            record = _WindowRecord(window=window_obj, bounds=(x_val, y_val, w_val, h_val), members=[window_obj.name])
+            if window_obj.pid is None:
+                no_pid_records.append(record)
+            else:
+                records_by_pid.setdefault(window_obj.pid, []).append(record)
             self._window_by_id[window_id] = window_obj
 
-        # Drop auxiliary surfaces (e.g., tab strips) when a PID has a much larger main window.
-        pruned: List[Window] = []
-        by_pid: Dict[int, List[Window]] = {}
-        for w in self._window_cache:
-            if w.pid is not None:
-                by_pid.setdefault(w.pid, []).append(w)
-            else:
-                pruned.append(w)
+        grouped_records: List[_WindowRecord] = list(no_pid_records)
+        for pid, records in records_by_pid.items():
+            grouped_records.extend(self._process_pid_records(pid, records))
 
-        deduped: List[Window] = []
-        for pid, wins in by_pid.items():
-            if len(wins) == 1:
-                pruned.extend(wins)
-                continue
-            max_area = max(w.width * w.height for w in wins)
-            filtered: List[Window] = []
-            for w in wins:
-                area = w.width * w.height
-                if max_area > 0 and area < max_area * 0.6 and w.height < 150:
-                    continue
-                filtered.append(w)
-
-            # Deduplicate near-identical overlaps (e.g., terminal tabs).
-            filtered = sorted(
-                filtered,
-                key=lambda w: (
-                    0 if w.is_active else 1,
-                    -(w.width * w.height),
-                ),
-            )
-            kept: List[Window] = []
-            for w in filtered:
-                if any(_windows_overlap(w, k) for k in kept):
-                    continue
-                kept.append(w)
-            deduped.extend(kept)
-
-        self._window_cache = pruned + deduped
-        self._window_by_id = {w.id: w for w in self._window_cache}
+        self._window_cache = [rec.window for rec in grouped_records]
+        for rec in grouped_records:
+            deduped_names = list(dict.fromkeys(rec.members))
+            setattr(rec.window, "group_members", deduped_names)
 
         if (
             self._window_cache
@@ -678,8 +850,11 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
         if not ax_window:
             logger.error(f"Could not find AX window for '{window.name}'")
             return
-        if self._set_window_position(ax_window, x, y):
+        x, y = self._clamp_to_monitor(window, x, y)
+        ax_x, ax_y = self._ax_position_for(window, x, y)
+        if self._set_window_position(ax_window, ax_x, ax_y):
             self._update_cached_window(window, position=(x, y))
+            self._invalidate_cache()
         else:
             logger.error(f"Failed to move window '{window.name}' to ({x}, {y})")
 
@@ -690,6 +865,7 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
             return
         if self._set_window_size(ax_window, width, height):
             self._update_cached_window(window, size=(width, height))
+            self._invalidate_cache()
         else:
             logger.error(f"Failed to resize window '{window.name}' to ({width}, {height})")
 
@@ -701,6 +877,8 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
         err = AXUIElementSetAttributeValue(ax_window, kAXMinimizedAttribute, kCFBooleanTrue)
         if err != kAXErrorSuccess:
             logger.error(f"Failed to minimize window '{window.name}'")
+        else:
+            self._invalidate_cache()
 
     def maximize_window(self, window: Window):
         monitor = self.get_monitor_for_window(window)
@@ -763,6 +941,7 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
                     logger.error(f"Failed to close window '{window.name}' via close button")
             else:
                 logger.error(f"No close button available for '{window.name}'")
+            self._invalidate_cache()
         finally:
             _safe_cf_release(close_button)
 

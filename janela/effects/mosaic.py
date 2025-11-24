@@ -3,11 +3,12 @@
 # pylint: disable=too-many-branches,too-many-statements,too-many-nested-blocks,R0914,broad-except
 # pylint: disable=logging-fstring-interpolation
 import math
-from typing import Tuple
+from typing import List, Tuple
 
 from janela.interfaces.interface import Janela
 from janela.interfaces.models import Monitor
 from janela.logger import logger
+from janela.utils.ascii_plan import DisplayPlan, TilePlan
 
 _FULL_HD_RESOLUTION = (1920, 1080)
 _QHD_RESOLUTION = (2560, 1440)
@@ -24,14 +25,13 @@ def mosaic(ja: Janela):
     """
     # Get all monitors
     monitors = ja.list_monitors()
+    all_windows = ja.list_windows()
 
     for monitor in monitors:
         try:
             # Get windows for this monitor
             windows = [
-                window
-                for window in ja.list_windows()
-                if window.monitor == monitor
+                window for window in all_windows if window.monitor == monitor
             ]
             # Filter out windows we cannot control (e.g., AX-inaccessible apps on macOS).
             windows = [w for w in windows if ja.can_control_window(w)]
@@ -40,8 +40,10 @@ def mosaic(ja: Janela):
 
             # Sort windows alphabetically, handle cases where window name might be None
             windows = sorted(windows, key=lambda w: (w.name or "").lower())
-            for idx, window in enumerate(windows, start=1):
-                logger.info("Window %d on monitor '%s': %s", idx, monitor.name, window.name)
+            start_state = {
+                w.id: (w.x, w.y, w.width, w.height)
+                for w in windows
+            }
 
             logger.debug("Processing %d windows on monitor '%s'.", len(windows), monitor.name)
 
@@ -60,14 +62,26 @@ def mosaic(ja: Janela):
                     monitor.height // 2 + (monitor.height % 2),
                     monitor.height // 2,
                 ]
-                y = monitor.y
-                for window, height in zip(windows, heights):
+                top_y = monitor.y + monitor.height - heights[0]
+                bottom_y = monitor.y
+
+                top_window, bottom_window = windows[0], windows[1]
+                targets = [
+                    (top_window, monitor.x, top_y, monitor.width, heights[0]),
+                    (bottom_window, monitor.x, bottom_y, monitor.width, heights[1]),
+                ]
+                for window, x, y, w, h in targets:
                     if ja.is_window_maximized(window):
                         ja.unmaximize_window(window)
-                    ja.resize_window(window, monitor.width, height)
-                    ja.move_window_to_position(window, monitor.x, y)
-                    placements.append((window, monitor.x, y, monitor.width, height))
-                    y += height
+                    ja.resize_window(window, w, h)
+                    ja.move_window_to_position(window, x, y)
+                    placements.append(
+                        (
+                            window,
+                            start_state.get(window.id, (window.x, window.y, window.width, window.height)),
+                            (x, y, w, h),
+                        )
+                    )
             else:
                 # Calculate the ideal number of rows and columns for the mosaic
                 rows, columns = get_number_of_rows_columns(len(windows), monitor)
@@ -77,7 +91,7 @@ def mosaic(ja: Janela):
                 extra_height = monitor.height % rows
 
                 idx = 0
-                current_y = monitor.y
+                top_offset = 0
                 for row in range(rows):
                     remaining = len(windows) - idx
                     cols_this_row = min(columns, remaining)
@@ -99,7 +113,8 @@ def mosaic(ja: Janela):
                             width = base_width + (1 if col < extra_width else 0)
                             height = row_height
                             x = current_x
-                            y = current_y
+                            y_top = top_offset
+                            y = monitor.y + monitor.height - (y_top + height)
                             current_x += width
 
                             logger.debug(
@@ -113,18 +128,25 @@ def mosaic(ja: Janela):
 
                             ja.resize_window(window, width, height)
                             ja.move_window_to_position(window, x, y)
-                            placements.append((window, x, y, width, height))
+                            placements.append(
+                                (
+                                    window,
+                                    start_state.get(window.id, (window.x, window.y, window.width, window.height)),
+                                    (x, y, width, height),
+                                )
+                            )
                         except Exception as e:  # pylint: disable=broad-except
                             logger.exception("Error processing window '%s': %s", window.name, e)
 
-                    current_y += row_height
+                    top_offset += row_height
 
             # Verify placements; retry once for any that failed to land correctly.
             retry_targets = []
-            for window, x, y, width, height in placements:
+            for window, _, target_rect in placements:
+                x, y, width, height = target_rect
                 updated = ja.get_window_by_id(window.id)
                 if updated is None:
-                    retry_targets.append((window, x, y, width, height))
+                    retry_targets.append((window, target_rect))
                     continue
                 tolerance = 5
                 if (
@@ -133,9 +155,10 @@ def mosaic(ja: Janela):
                     or abs(updated.width - width) > tolerance
                     or abs(updated.height - height) > tolerance
                 ):
-                    retry_targets.append((updated, x, y, width, height))
+                    retry_targets.append((updated, target_rect))
 
-            for window, x, y, width, height in retry_targets:
+            for window, target_rect in retry_targets:
+                x, y, width, height = target_rect
                 try:
                     if ja.is_window_maximized(window):
                         ja.unmaximize_window(window)
@@ -143,6 +166,31 @@ def mosaic(ja: Janela):
                     ja.move_window_to_position(window, x, y)
                 except Exception as e:  # pylint: disable=broad-except
                     logger.exception("Retry failed for window '%s': %s", window.name, e)
+
+            logger.info("")
+            logger.info("Display %s (%dx%d pixels):", monitor.name, monitor.width, monitor.height)
+            for idx, (window, start_rect, target_rect) in enumerate(placements, start=1):
+                names = getattr(window, "group_members", [window.name])
+                logger.info(
+                    "Tile %d: [%s] - start_position: (%d,%d,%d,%d) -> final_position: (%d,%d,%d,%d)",
+                    idx,
+                    ", ".join(names),
+                    start_rect[0],
+                    start_rect[1],
+                    start_rect[2],
+                    start_rect[3],
+                    target_rect[0],
+                    target_rect[1],
+                    target_rect[2],
+                    target_rect[3],
+                )
+            plan = _build_display_plan(monitor, placements)
+            ascii_plan = plan.render_ascii() if plan else ""
+            if ascii_plan:
+                logger.info("ASCII plan for %s:\n%s", monitor.name, ascii_plan)
+                legend = _legend_lines(placements)
+                if legend:
+                    logger.info("Legend:\n%s", "\n".join(legend))
 
         except Exception as e:  # pylint: disable=broad-except
             logger.exception("Error processing monitor '%s': %s", monitor.name, e)
@@ -185,3 +233,41 @@ def get_number_of_rows_columns(window_count: int, monitor: Monitor) -> Tuple[int
             columns += 1
 
     return rows, columns
+
+
+def _build_display_plan(monitor: Monitor, placements: List[tuple]) -> DisplayPlan | None:
+    if monitor.width <= 0 or monitor.height <= 0 or not placements:
+        return None
+
+    tiles: List[TilePlan] = []
+    for idx, (window, _, target_rect) in enumerate(placements, start=1):
+        x, y, w, h = target_rect
+        rel_x = x - monitor.x
+        rel_y_bottom = y - monitor.y
+        top_y = monitor.height - (rel_y_bottom + h)
+        label = f"{idx}"
+        names = getattr(window, "group_members", [window.name])
+        if names:
+            label = f"{idx}:{names[0][:10]}"
+        tiles.append(
+            TilePlan(
+                index=idx,
+                x=rel_x,
+                y=top_y,
+                width=w,
+                height=h,
+                label=label,
+            )
+        )
+
+    return DisplayPlan(width=monitor.width, height=monitor.height, tiles=tiles)
+
+
+def _legend_lines(placements: List[tuple]) -> List[str]:
+    lines: List[str] = []
+    for idx, (window, _, _) in enumerate(placements, start=1):
+        names = getattr(window, "group_members", [window.name])
+        proc = getattr(window, "process_name", None)
+        proc_text = f" ({proc})" if proc else ""
+        lines.append(f"Tile {idx}: [{', '.join(names)}]{proc_text}")
+    return lines
