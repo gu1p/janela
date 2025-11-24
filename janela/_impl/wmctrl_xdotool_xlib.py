@@ -284,8 +284,8 @@ class LinuxImpl(Janela):
                     "_NET_WM_STATE_MAXIMIZED_HORZ"
                 )
                 return maximized_vert in atoms and maximized_horz in atoms
-        except Exception as e:
-            logger.error(f"Error checking if window {window.name} is maximized: {e}")
+        except Exception as e:  # pylint: disable=broad-except
+            logger.error("Error checking if window %s is maximized: %s", window.name, e)
         return False
 
     def unmaximize_window(self, window: Window):
