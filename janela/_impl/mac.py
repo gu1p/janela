@@ -305,6 +305,7 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
     """macOS-specific window management implementation."""
 
     def __init__(self) -> None:
+        logger.debug("Initializing macOS implementation")
         _init_mac_apis()
 
         self._restore_bounds: Dict[str, Tuple[int, int, int, int]] = {}
@@ -316,13 +317,20 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
         self._cache_valid = False
         self._screen_recording_checked = False
         self._max_display_extent: Optional[int] = None
+        logger.debug("Starting state: caches empty, restore bounds cleared")
         self._ensure_accessibility_permissions()
         self._ensure_screen_recording_permissions()
 
     def _invalidate_cache(self) -> None:
+        logger.debug(
+            "Invalidating window cache (cached=%d, window_by_id=%d)",
+            len(self._window_cache),
+            len(self._window_by_id),
+        )
         self._cache_valid = False
 
     def _ensure_accessibility_permissions(self) -> None:
+        logger.info("Ensuring Accessibility permissions are granted")
         options = None
         if AXIsProcessTrustedWithOptions and kAXTrustedCheckOptionPrompt and CFDictionaryCreate:
             keys = (c_void_p * 1)(kAXTrustedCheckOptionPrompt)
@@ -341,14 +349,18 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
                 "Janela requires Accessibility access. Grant permission in "
                 "System Settings → Privacy & Security → Accessibility and re-run."
             )
+        logger.info("Accessibility permissions verified")
 
     def _ensure_screen_recording_permissions(self) -> None:
+        logger.info("Ensuring Screen Recording permissions are granted")
         if self._screen_recording_checked:
+            logger.debug("Screen recording permissions already checked")
             return
         self._screen_recording_checked = True
 
         try:
             if CGPreflightScreenCaptureAccess and CGPreflightScreenCaptureAccess():
+                logger.debug("Preflight screen capture access succeeded")
                 return
         except Exception:
             pass
@@ -356,6 +368,7 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
         if CGRequestScreenCaptureAccess:
             try:
                 if CGRequestScreenCaptureAccess():
+                    logger.debug("Screen capture access granted via prompt")
                     return
             except Exception:
                 pass
@@ -363,6 +376,7 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
         self._open_screen_recording_settings()
 
     def _open_screen_recording_settings(self) -> None:
+        logger.info("Opening Screen Recording settings for user action")
         try:
             subprocess.run(
                 [
@@ -379,12 +393,57 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
             )
 
     def _clear_ax_windows_cache(self) -> None:
+        total_cached = sum(len(windows) for windows in self._ax_windows_by_pid.values())
+        logger.debug(
+            "Clearing AX window cache for %d pids (%d windows)",
+            len(self._ax_windows_by_pid),
+            total_cached,
+        )
         for windows in self._ax_windows_by_pid.values():
             for win_ref in windows:
                 _safe_cf_release(win_ref)
         self._ax_windows_by_pid = {}
 
+    def _is_cg_window_visible(self, cg_win: dict, window_id: str) -> bool:
+        bounds = cg_win.get("kCGWindowBounds", {}) or {}
+        width = int(bounds.get("Width", 0))
+        height = int(bounds.get("Height", 0))
+        is_onscreen = bool(cg_win.get("kCGWindowIsOnscreen", 0))
+        alpha = float(cg_win.get("kCGWindowAlpha", 1.0))
+        if not is_onscreen:
+            logger.debug("Skipping window %s: not on screen", window_id)
+            return False
+        if width <= 1 or height <= 1:
+            logger.debug("Skipping window %s: tiny bounds (%d x %d)", window_id, width, height)
+            return False
+        if alpha <= 0:
+            logger.debug("Skipping window %s: fully transparent (alpha=%s)", window_id, alpha)
+            return False
+        return True
+
+    def _is_ax_window_minimized(self, ax_window: Optional[c_void_p]) -> Optional[bool]:
+        if not ax_window:
+            return None
+        err, minimized_ref = self._copy_attribute(ax_window, kAXMinimizedAttribute)
+        try:
+            if err != kAXErrorSuccess or minimized_ref is None:
+                logger.debug("AX minimized state unavailable (err=%s)", err)
+                return None
+            return minimized_ref == kCFBooleanTrue
+        finally:
+            _safe_cf_release(minimized_ref)
+
+    def _is_window_visible(self, cg_win: dict, window_obj: Window, ax_window: Optional[c_void_p]) -> bool:
+        if not self._is_cg_window_visible(cg_win, window_obj.id):
+            return False
+        minimized = self._is_ax_window_minimized(ax_window)
+        if minimized:
+            logger.debug("Skipping window '%s' (%s) because it is minimized", window_obj.name, window_obj.id)
+            return False
+        return True
+
     def _get_window_list(self, options: int) -> List[dict]:
+        logger.debug("Fetching window list with options=%d", options)
         if not CGWindowListCopyWindowInfo:
             return []
         window_array = CGWindowListCopyWindowInfo(options, kCGNullWindowID)
@@ -393,19 +452,23 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
         try:
             plist_obj = _cfarray_to_plist(window_array)
             if isinstance(plist_obj, list):
+                logger.debug("Fetched %d raw windows from CGWindowListCopyWindowInfo", len(plist_obj))
                 return plist_obj
             return []
         finally:
             _safe_cf_release(window_array)
 
     def get_monitors(self) -> List[Monitor]:
+        logger.info("Enumerating monitors")
         count = c_uint32(0)
         monitors: List[Monitor] = []
         if not CGGetActiveDisplayList:
+            logger.debug("CoreGraphics display list function unavailable")
             return monitors
 
         CGGetActiveDisplayList(0, None, ctypes.byref(count))
         if count.value == 0:
+            logger.debug("No monitors reported by CoreGraphics")
             return monitors
 
         display_ids = (c_uint32 * count.value)()
@@ -429,17 +492,26 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
             monitors.append(monitor)
         if max_extent > 0:
             self._max_display_extent = max_extent
+        logger.info(
+            "Detected %d monitor(s); max display extent=%s",
+            len(monitors),
+            self._max_display_extent,
+        )
         return monitors
 
     def _active_window_from_list(self, window_list: List[dict]) -> str:
         for win in window_list:
             if win.get("kCGWindowLayer", 0) == 0:
-                return str(win.get("kCGWindowNumber", "")) or ""
+                active_id = str(win.get("kCGWindowNumber", "")) or ""
+                logger.debug("Active window candidate from list: %s", active_id)
+                return active_id
         return ""
 
     def get_active_window_id(self) -> str:
         window_list = self._get_window_list(kCGWindowListOptionOnScreenOnly)
-        return self._active_window_from_list(window_list)
+        active_id = self._active_window_from_list(window_list)
+        logger.info("Active window id resolved to: %s", active_id)
+        return active_id
 
     def _copy_attribute(self, element: c_void_p, attribute: c_void_p) -> Tuple[int, Optional[int]]:
         if not element:
@@ -450,10 +522,13 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
 
     def _get_ax_windows_for_pid(self, pid: int) -> List[int]:
         if pid in self._ax_windows_by_pid:
+            logger.debug("AX windows for pid %d loaded from cache (%d entries)", pid, len(self._ax_windows_by_pid[pid]))
             return self._ax_windows_by_pid[pid]
 
+        logger.debug("Fetching AX windows for pid %d", pid)
         app_ref = AXUIElementCreateApplication(pid) if AXUIElementCreateApplication else None
         if not app_ref:
+            logger.debug("AX application reference missing for pid %d", pid)
             self._ax_windows_by_pid[pid] = []
             return []
         try:
@@ -461,11 +536,13 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
             if err == kAXErrorSuccess and ax_windows:
                 windows = _cfarray_to_ax_list(ax_windows)
                 self._ax_windows_by_pid[pid] = windows
+                logger.debug("Fetched %d AX windows for pid %d", len(windows), pid)
                 return windows
         finally:
             _safe_cf_release(app_ref)
 
         self._ax_windows_by_pid[pid] = []
+        logger.debug("No AX windows available for pid %d", pid)
         return []
 
     def _get_ax_window_numbers_for_pid(self, pid: int) -> set[int]:
@@ -480,10 +557,13 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
                         numbers.add(win_id)
             finally:
                 _safe_cf_release(win_id_ref)
+        logger.debug("AX window numbers for pid %d: %s", pid, sorted(numbers))
         return numbers
 
     def _find_ax_window(self, window: Window, log_missing: bool = True):
+        logger.debug("Locating AX window for id=%s name='%s' pid=%s", window.id, window.name, window.pid)
         if window.pid is None:
+            logger.debug("Window %s has no pid; skipping AX lookup", window.id)
             return None
 
         ax_windows = self._get_ax_windows_for_pid(window.pid)
@@ -500,6 +580,7 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
                 if err == kAXErrorSuccess and win_id_ref:
                     win_id = _cfnumber_to_int(win_id_ref)
                     if win_id is not None and win_id == target_id:
+                        logger.debug("Matched AX window %s by window number", window.id)
                         return c_void_p(ax_ref)
             finally:
                 _safe_cf_release(win_id_ref)
@@ -515,15 +596,19 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
                         or target_lower in title_lower
                         or title_lower in target_lower
                     ):
+                        logger.debug("Matched AX window %s by title '%s'", window.id, title_lower)
                         return c_void_p(ax_ref)
             finally:
                 _safe_cf_release(title_ref)
 
         if ax_windows:
+            logger.debug("Falling back to first AX window for pid %s", window.pid)
             return c_void_p(ax_windows[0])
+        logger.debug("No AX match found for window %s", window.id)
         return None
 
     def _set_window_position(self, ax_window: c_void_p, x: int, y: int) -> bool:
+        logger.info("Setting window position to (%d, %d)", x, y)
         point = CGPoint(x, y)
         pos_value = AXValueCreate(kAXValueCGPointType, ctypes.byref(point)) if AXValueCreate else None
         if not pos_value:
@@ -531,11 +616,14 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
             return False
         try:
             err = AXUIElementSetAttributeValue(ax_window, kAXPositionAttribute, pos_value)
+            if err != kAXErrorSuccess:
+                logger.debug("AXUIElementSetAttributeValue returned error code %s when moving", err)
             return err == kAXErrorSuccess
         finally:
             _safe_cf_release(pos_value)
 
     def _set_window_size(self, ax_window: c_void_p, width: int, height: int) -> bool:
+        logger.info("Setting window size to (%d, %d)", width, height)
         size = CGSize(width, height)
         size_value = AXValueCreate(kAXValueCGSizeType, ctypes.byref(size)) if AXValueCreate else None
         if not size_value:
@@ -543,6 +631,8 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
             return False
         try:
             err = AXUIElementSetAttributeValue(ax_window, kAXSizeAttribute, size_value)
+            if err != kAXErrorSuccess:
+                logger.debug("AXUIElementSetAttributeValue returned error code %s when resizing", err)
             return err == kAXErrorSuccess
         finally:
             _safe_cf_release(size_value)
@@ -554,7 +644,17 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
         if monitor:
             relative_bottom = y - monitor.y
             y_ax = monitor.y + monitor.height - (relative_bottom + rect_height)
+            logger.debug(
+                "Converted CG coords (%d, %d) to AX coords (%d, %d) using monitor %s height=%d",
+                x,
+                y,
+                x,
+                y_ax,
+                monitor.id,
+                rect_height,
+            )
             return x, y_ax
+        logger.debug("Using CG coords (%d, %d) directly for AX", x, y)
         return x, y
 
     def _get_pid_bounds(self, pid: int) -> Dict[str, Tuple[int, int, int, int]]:
@@ -573,10 +673,12 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
                 int(bounds.get("Width", 0)),
                 int(bounds.get("Height", 0)),
             )
+        logger.debug("PID %d bounds snapshot contains %d window(s)", pid, len(result))
         return result
 
     @staticmethod
     def _merge_members(target: _WindowRecord, names: List[str]) -> None:
+        logger.debug("Merging window members %s into %s", names, target.members)
         target.members = list(dict.fromkeys(target.members + names))
 
     def _probe_coupled_records(
@@ -587,7 +689,14 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
     ) -> set[str]:
         """Move the primary window slightly; any siblings that move with it are merged."""
         if not others:
+            logger.debug("No sibling windows to probe for pid %d", pid)
             return set()
+        logger.debug(
+            "Probing for coupled windows for pid %d using primary %s and %d other(s)",
+            pid,
+            primary.window.id,
+            len(others),
+        )
         primary_pos = primary.bounds
         ax_primary = self._find_ax_window(primary.window, log_missing=False)
         if not ax_primary:
@@ -625,15 +734,22 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
 
         orig_ax_x, orig_ax_y = self._ax_position_for(primary.window, primary_pos[0], primary_pos[1], primary.bounds[3])
         self._set_window_position(ax_primary, orig_ax_x, orig_ax_y)
+        logger.debug("Coupling probe complete for pid %d; coupled windows: %s", pid, sorted(coupled))
         return coupled
 
     def _ensure_display_extent(self) -> int:
         if self._max_display_extent is None:
+            logger.debug("Max display extent unknown; refreshing monitors")
             self.get_monitors()
+        logger.debug("Current max display extent: %s", self._max_display_extent)
         return self._max_display_extent or 0
 
     def _process_pid_records(self, pid: int, records: List[_WindowRecord]) -> List[_WindowRecord]:
+        logger.debug(
+            "Processing %d window record(s) for pid %d", len(records), pid
+        )
         if len(records) == 1:
+            logger.debug("Single window for pid %d; skipping dedupe", pid)
             return records
 
         max_area = max(r.bounds[2] * r.bounds[3] for r in records)
@@ -688,6 +804,13 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
                     self._merge_members(primary_rec, rec.members)
                 kept = [primary_rec]
 
+        logger.debug(
+            "After processing pid %d records: kept %d, dropped_small=%d, dropped_overlap=%d",
+            pid,
+            len(kept),
+            len(dropped_small),
+            len(dropped_overlap),
+        )
         if dropped_small or dropped_overlap:
             logger.info(
                 "PID %d dedupe: kept %d; dropped %d small, %d overlap. Kept windows: %s",
@@ -703,11 +826,17 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
         return kept
 
     def list_windows(self) -> List[Window]:
+        logger.info(
+            "Listing windows (cache_valid=%s, cached=%d)",
+            self._cache_valid,
+            len(self._window_cache),
+        )
         self._window_cache = []
         self._window_by_id = {}
         self._clear_ax_windows_cache()
 
-        window_list = self._get_window_list(kCGWindowListOptionAll)
+        window_list = self._get_window_list(kCGWindowListOptionOnScreenOnly)
+        logger.debug("CG returned %d window entries (onscreen only)", len(window_list))
         if not window_list and not self._warned_screen_recording:
             logger.warning(
                 "No windows found. macOS may require Screen Recording permission "
@@ -724,10 +853,15 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
             numbers = self._get_ax_window_numbers_for_pid(pid)
             if numbers:
                 ax_window_numbers_by_pid[pid] = numbers
+        logger.debug(
+            "AX window number map prepared for %d pid(s)", len(ax_window_numbers_by_pid)
+        )
 
         active_id = self._active_window_from_list(window_list)
         records_by_pid: Dict[int, List[_WindowRecord]] = {}
         no_pid_records: List[_WindowRecord] = []
+        dropped_uncontrollable = 0
+        dropped_invisible = 0
         for win in window_list:
             if win.get("kCGWindowLayer", 0) != 0:
                 continue
@@ -766,6 +900,19 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
                 is_active=window_id == active_id,
                 pid=int(pid) if pid is not None else None,
             )
+            ax_window = self._find_ax_window(window_obj, log_missing=False)
+            if not ax_window:
+                dropped_uncontrollable += 1
+                logger.debug(
+                    "Skipping window '%s' (%s) pid=%s due to missing AX control",
+                    window_obj.name,
+                    window_id,
+                    window_obj.pid,
+                )
+                continue
+            if not self._is_window_visible(win, window_obj, ax_window):
+                dropped_invisible += 1
+                continue
             setattr(window_obj, "process_name", owner_name)
             record = _WindowRecord(window=window_obj, bounds=(x_val, y_val, w_val, h_val), members=[window_obj.name])
             if window_obj.pid is None:
@@ -773,6 +920,11 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
             else:
                 records_by_pid.setdefault(window_obj.pid, []).append(record)
             self._window_by_id[window_id] = window_obj
+        logger.debug(
+            "Window records grouped: %d with pid, %d without pid",
+            len(records_by_pid),
+            len(no_pid_records),
+        )
 
         grouped_records: List[_WindowRecord] = list(no_pid_records)
         for pid, records in records_by_pid.items():
@@ -797,6 +949,12 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
             self._warned_screen_recording = True
 
         self._cache_valid = True
+        logger.info(
+            "Window listing complete: %d window(s) cached; %d dropped (no AX control); %d dropped (invisible/minimized)",
+            len(self._window_cache),
+            dropped_uncontrollable,
+            dropped_invisible,
+        )
         return list(self._window_cache)
 
     def _update_cached_window(
@@ -804,7 +962,14 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
     ) -> None:
         cached = self._window_by_id.get(window.id)
         if not cached:
+            logger.debug("No cached window entry to update for id=%s", window.id)
             return
+        logger.debug(
+            "Updating cached window %s (position=%s, size=%s)",
+            window.id,
+            position,
+            size,
+        )
         if position is not None:
             x_val, y_val = position
             cached.x = x_val
@@ -819,16 +984,20 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
             window.height = height_val
 
     def get_monitor_for_window(self, window: Window) -> Optional[Monitor]:
+        logger.debug("Resolving monitor for window %s at (%d, %d)", window.id, window.x, window.y)
         monitors = self.get_monitors()
         for monitor in monitors:
             if (
                 monitor.x <= window.x < monitor.x + monitor.width
                 and monitor.y <= window.y < monitor.y + monitor.height
             ):
+                logger.debug("Window %s is on monitor %s", window.id, monitor.id)
                 return monitor
+        logger.debug("No monitor contains window %s", window.id)
         return None
 
     def move_window_to_position(self, window: Window, x: int, y: int):
+        logger.info("Request to move window '%s' (%s) to (%d, %d)", window.name, window.id, x, y)
         ax_window = self._find_ax_window(window)
         if not ax_window:
             logger.error(f"Could not find AX window for '{window.name}'")
@@ -837,10 +1006,12 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
         if self._set_window_position(ax_window, ax_x, ax_y):
             self._update_cached_window(window, position=(x, y))
             self._invalidate_cache()
+            logger.info("Moved window '%s' (%s) to (%d, %d)", window.name, window.id, x, y)
         else:
             logger.error(f"Failed to move window '{window.name}' to ({x}, {y})")
 
     def resize_window(self, window: Window, width: int, height: int):
+        logger.info("Request to resize window '%s' (%s) to (%d, %d)", window.name, window.id, width, height)
         ax_window = self._find_ax_window(window)
         if not ax_window:
             logger.error(f"Could not find AX window for '{window.name}'")
@@ -848,10 +1019,12 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
         if self._set_window_size(ax_window, width, height):
             self._update_cached_window(window, size=(width, height))
             self._invalidate_cache()
+            logger.info("Resized window '%s' (%s) to (%d, %d)", window.name, window.id, width, height)
         else:
             logger.error(f"Failed to resize window '{window.name}' to ({width}, {height})")
 
     def minimize_window(self, window: Window):
+        logger.info("Request to minimize window '%s' (%s)", window.name, window.id)
         ax_window = self._find_ax_window(window)
         if not ax_window:
             logger.error(f"Could not find AX window for '{window.name}'")
@@ -860,9 +1033,11 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
         if err != kAXErrorSuccess:
             logger.error(f"Failed to minimize window '{window.name}'")
         else:
+            logger.info("Minimized window '%s' (%s)", window.name, window.id)
             self._invalidate_cache()
 
     def maximize_window(self, window: Window):
+        logger.info("Request to maximize window '%s' (%s)", window.name, window.id)
         monitor = self.get_monitor_for_window(window)
         if monitor:
             self._restore_bounds[window.id] = (
@@ -871,10 +1046,17 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
                 window.width,
                 window.height,
             )
+            logger.debug(
+                "Stored restore bounds for window %s: %s",
+                window.id,
+                self._restore_bounds[window.id],
+            )
             self.resize_window(window, monitor.width, monitor.height)
             self.move_window_to_position(window, monitor.x, monitor.y)
+            logger.info("Maximized window '%s' on monitor %s", window.name, monitor.id)
 
     def move_to_monitor(self, window: Window, monitor: Monitor):
+        logger.info("Moving window '%s' (%s) to monitor %s", window.name, window.id, monitor.id)
         target_x = monitor.x + (monitor.width - window.width) // 2
         target_y = monitor.y + (monitor.height - window.height) // 2
         self.move_window_to_position(window, target_x, target_y)
@@ -884,22 +1066,40 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
     ) -> bool:
         updated_window = self.get_window_by_id(window.id)
         if updated_window is None:
+            logger.debug("Window %s missing when verifying move", window.id)
             return False
-        return (
+        current_monitor = self.get_monitor_for_window(updated_window)
+        matches = (
             updated_window.x == expected_x
             and updated_window.y == expected_y
-            and self.get_monitor_for_window(updated_window) == target_monitor
+            and current_monitor == target_monitor
         )
+        logger.debug(
+            "Verify move for window %s: expected (%d, %d) on monitor %s, actual (%d, %d) on %s, matches=%s",
+            window.id,
+            expected_x,
+            expected_y,
+            target_monitor.id,
+            updated_window.x,
+            updated_window.y,
+            getattr(current_monitor, "id", None),
+            matches,
+        )
+        return matches
 
     def get_window_by_id(self, window_id: str) -> Optional[Window]:
+        logger.debug("Fetching window by id=%s (cache_valid=%s)", window_id, self._cache_valid)
         if not self._cache_valid:
             self.list_windows()
         cached = self._window_by_id.get(window_id)
         if cached:
+            logger.debug("Found window %s in cache", window_id)
             return cached
+        logger.debug("Window %s not found in cache", window_id)
         return None
 
     def focus_window(self, window: Window):
+        logger.info("Request to focus window '%s' (%s)", window.name, window.id)
         ax_window = self._find_ax_window(window)
         if not ax_window:
             logger.error(f"Could not find AX window for '{window.name}'")
@@ -907,10 +1107,12 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
         err = AXUIElementPerformAction(ax_window, kAXRaiseAction)
         if err == kAXErrorSuccess:
             window.is_active = True
+            logger.info("Focused window '%s' (%s)", window.name, window.id)
         else:
             logger.error(f"Failed to focus window '{window.name}'")
 
     def close_window(self, window: Window):
+        logger.info("Request to close window '%s' (%s)", window.name, window.id)
         ax_window = self._find_ax_window(window)
         if not ax_window:
             logger.error(f"Could not find AX window for '{window.name}'")
@@ -924,52 +1126,71 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
             else:
                 logger.error(f"No close button available for '{window.name}'")
             self._invalidate_cache()
+            logger.info("Closed window '%s' (%s)", window.name, window.id)
         finally:
             _safe_cf_release(close_button)
 
     def list_monitors(self) -> List[Monitor]:
-        return sorted(self.get_monitors(), key=lambda m: m.name)
+        monitors = sorted(self.get_monitors(), key=lambda m: m.name)
+        logger.info("Listing monitors: %s", [m.id for m in monitors])
+        return monitors
 
     def get_active_window(self) -> Optional[Window]:
         active_window_id = self.get_active_window_id()
-        return self.get_window_by_id(active_window_id)
+        active_window = self.get_window_by_id(active_window_id)
+        logger.info("Active window resolved to %s", getattr(active_window, "id", None))
+        return active_window
 
     def verify_window_positions(self) -> bool:
+        logger.debug("Verifying window positions (macOS stub returns True)")
         return True
 
     def get_window_by_name(self, name: str) -> Optional[Window]:
+        logger.debug("Searching for window by exact name '%s'", name)
         window_list = self.list_windows()
         for window in window_list:
             if window.name == name:
+                logger.debug("Found window by name '%s' with id %s", name, window.id)
                 return window
+        logger.debug("No window found with name '%s'", name)
         return None
 
     def get_monitor_by_id(self, monitor_id: int) -> Optional[Monitor]:
+        logger.debug("Searching for monitor by id %s", monitor_id)
         monitors = self.get_monitors()
         for monitor in monitors:
             if monitor.id == monitor_id:
+                logger.debug("Found monitor %s", monitor.id)
                 return monitor
+        logger.debug("Monitor %s not found", monitor_id)
         return None
 
     def is_window_maximized(self, window: Window) -> bool:
         monitor = self.get_monitor_for_window(window)
         if monitor:
-            return (
+            maximized = (
                 window.x == monitor.x
                 and window.y == monitor.y
                 and window.width == monitor.width
                 and window.height == monitor.height
             )
+            logger.debug("Window %s maximized=%s on monitor %s", window.id, maximized, monitor.id)
+            return maximized
+        logger.debug("Cannot determine maximized state for window %s without monitor", window.id)
         return False
 
     def unmaximize_window(self, window: Window) -> None:
         restore = self._restore_bounds.get(window.id)
         if restore:
             x, y, width, height = restore
+            logger.info("Restoring window '%s' (%s) to saved bounds %s", window.name, window.id, restore)
             self.move_window_to_position(window, x, y)
             self.resize_window(window, width, height)
             return
+        logger.info("No restore bounds for window '%s' (%s); resizing to half dimensions", window.name, window.id)
         self.resize_window(window, max(800, window.width // 2), max(600, window.height // 2))
 
     def can_control_window(self, window: Window) -> bool:
-        return self._find_ax_window(window, log_missing=False) is not None
+        can_control = self._find_ax_window(window, log_missing=False) is not None
+        logger.debug("Control check for window '%s' (%s): %s", window.name, window.id, can_control)
+        return can_control
