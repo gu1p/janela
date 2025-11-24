@@ -49,6 +49,7 @@ class MacOSImpl(Janela):
         )
         self._restore_bounds: Dict[str, Tuple[int, int, int, int]] = {}
         self._warned_screen_recording = False
+        self._ax_missing_window_ids: set[str] = set()
 
     def _ensure_accessibility_permissions(self) -> None:
         # Prompt the user automatically if access has not been granted.
@@ -144,14 +145,16 @@ class MacOSImpl(Janela):
                 return result
             return kAXErrorSuccess, result
 
-    def _find_ax_window(self, window: Window):
+    def _find_ax_window(self, window: Window, log_missing: bool = True):
         if window.pid is None:
             return None
 
         app_ref = AXUIElementCreateApplication(window.pid)
         err, ax_windows = self._copy_attribute(app_ref, kAXWindowsAttribute)
         if err != kAXErrorSuccess or not ax_windows:
-            logger.warning(f"Unable to fetch AX windows for pid {window.pid}")
+            if log_missing and window.id not in self._ax_missing_window_ids:
+                logger.warning(f"Unable to fetch AX windows for pid {window.pid}")
+                self._ax_missing_window_ids.add(window.id)
             return None
 
         target_id = int(window.id)
@@ -406,3 +409,6 @@ class MacOSImpl(Janela):
             return
         # Fallback size if we do not know the original bounds
         self.resize_window(window, max(800, window.width // 2), max(600, window.height // 2))
+
+    def can_control_window(self, window: Window) -> bool:
+        return self._find_ax_window(window, log_missing=False) is not None

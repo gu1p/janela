@@ -185,3 +185,11 @@ class Janela(ABC):
 
         :param window: The window to unmaximize.
         """
+
+    def can_control_window(self, window: Window) -> bool:
+        """
+        Check if this backend can control the given window (move/resize).
+
+        By default returns True; platform-specific implementations may override.
+        """
+        return True

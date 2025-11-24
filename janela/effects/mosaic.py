@@ -29,6 +29,8 @@ def mosaic(ja: Janela):
                 for window in ja.list_windows()
                 if window.monitor == monitor
             ]
+            # Filter out windows we cannot control (e.g., AX-inaccessible apps on macOS).
+            windows = [w for w in windows if ja.can_control_window(w)]
             if not windows:
                 continue  # Skip monitors with no windows
 
@@ -46,33 +48,93 @@ def mosaic(ja: Janela):
                     ja.maximize_window(window)
                 continue
 
-            # Calculate the ideal number of rows and columns for the mosaic
-            rows, columns = get_number_of_rows_columns(len(windows), monitor)
+            placements = []
 
-            # Calculate the ideal window size
-            window_width = monitor.width // columns
-            window_height = monitor.height // rows
-
-            # Move and resize windows
-            for i, window in enumerate(windows):
-                try:
-                    # Unmaximize the window if it's maximized
+            # Special-case vertical monitors with two windows: stack top/bottom.
+            if monitor.is_vertical() and len(windows) == 2:
+                heights = [
+                    monitor.height // 2 + (monitor.height % 2),
+                    monitor.height // 2,
+                ]
+                y = monitor.y
+                for window, height in zip(windows, heights):
                     if ja.is_window_maximized(window):
                         ja.unmaximize_window(window)
+                    ja.resize_window(window, monitor.width, height)
+                    ja.move_window_to_position(window, monitor.x, y)
+                    placements.append((window, monitor.x, y, monitor.width, height))
+                    y += height
+            else:
+                # Calculate the ideal number of rows and columns for the mosaic
+                rows, columns = get_number_of_rows_columns(len(windows), monitor)
 
-                    # Calculate the position for this window
-                    row = i // columns
-                    col = i % columns
-                    x = monitor.x + col * window_width
-                    y = monitor.y + row * window_height
+                # Precompute row heights distributing any remainder pixels to the first rows
+                base_height = monitor.height // rows
+                extra_height = monitor.height % rows
 
-                    logger.debug(f"Resizing and moving window '{window.name}' to ({x}, {y}) with size ({window_width}, {window_height})")
+                idx = 0
+                current_y = monitor.y
+                for row in range(rows):
+                    remaining = len(windows) - idx
+                    cols_this_row = min(columns, remaining)
+                    if cols_this_row <= 0:
+                        break
 
-                    # Resize and position the window
-                    ja.resize_window(window, window_width, window_height)
+                    row_height = base_height + (1 if row < extra_height else 0)
+                    base_width = monitor.width // cols_this_row
+                    extra_width = monitor.width % cols_this_row
+
+                    current_x = monitor.x
+                    for col in range(cols_this_row):
+                        window = windows[idx]
+                        idx += 1
+                        try:
+                            if ja.is_window_maximized(window):
+                                ja.unmaximize_window(window)
+
+                            width = base_width + (1 if col < extra_width else 0)
+                            height = row_height
+                            x = current_x
+                            y = current_y
+                            current_x += width
+
+                            logger.debug(
+                                f"Resizing and moving window '{window.name}' to ({x}, {y}) with size ({width}, {height})"
+                            )
+
+                            ja.resize_window(window, width, height)
+                            ja.move_window_to_position(window, x, y)
+                            placements.append((window, x, y, width, height))
+                        except Exception as e:
+                            logger.exception(f"Error processing window '{window.name}': {e}")
+
+                    current_y += row_height
+
+            # Verify placements; retry once for any that failed to land correctly.
+            retry_targets = []
+            for window, x, y, width, height in placements:
+                updated = ja.get_window_by_id(window.id)
+                if updated is None:
+                    retry_targets.append((window, x, y, width, height))
+                    continue
+                tolerance = 5
+                if (
+                    abs(updated.x - x) > tolerance
+                    or abs(updated.y - y) > tolerance
+                    or abs(updated.width - width) > tolerance
+                    or abs(updated.height - height) > tolerance
+                ):
+                    retry_targets.append((updated, x, y, width, height))
+
+            for window, x, y, width, height in retry_targets:
+                try:
+                    if ja.is_window_maximized(window):
+                        ja.unmaximize_window(window)
+                    ja.resize_window(window, width, height)
                     ja.move_window_to_position(window, x, y)
                 except Exception as e:
-                    logger.exception(f"Error processing window '{window.name}': {e}")
+                    logger.exception(f"Retry failed for window '{window.name}': {e}")
+
         except Exception as e:
             logger.exception(f"Error processing monitor '{monitor.name}': {e}")
 
