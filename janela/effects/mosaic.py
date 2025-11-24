@@ -3,7 +3,7 @@
 # pylint: disable=too-many-branches,too-many-statements,too-many-nested-blocks,R0914,broad-except
 # pylint: disable=logging-fstring-interpolation
 import math
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from janela.interfaces.interface import Janela
 from janela.interfaces.models import Monitor
@@ -75,13 +75,11 @@ def mosaic(ja: Janela):
                         ja.unmaximize_window(window)
                     ja.resize_window(window, w, h)
                     ja.move_window_to_position(window, x, y)
-                    placements.append(
-                        (
-                            window,
-                            start_state.get(window.id, (window.x, window.y, window.width, window.height)),
-                            (x, y, w, h),
-                        )
+                    start_rect = start_state.get(
+                        window.id,
+                        (window.x, window.y, window.width, window.height),
                     )
+                    placements.append((window, start_rect, (x, y, w, h)))
             else:
                 # Calculate the ideal number of rows and columns for the mosaic
                 rows, columns = get_number_of_rows_columns(len(windows), monitor)
@@ -128,13 +126,11 @@ def mosaic(ja: Janela):
 
                             ja.resize_window(window, width, height)
                             ja.move_window_to_position(window, x, y)
-                            placements.append(
-                                (
-                                    window,
-                                    start_state.get(window.id, (window.x, window.y, window.width, window.height)),
-                                    (x, y, width, height),
-                                )
+                            start_rect = start_state.get(
+                                window.id,
+                                (window.x, window.y, window.width, window.height),
                             )
+                            placements.append((window, start_rect, (x, y, width, height)))
                         except Exception as e:  # pylint: disable=broad-except
                             logger.exception("Error processing window '%s': %s", window.name, e)
 
@@ -172,7 +168,7 @@ def mosaic(ja: Janela):
             for idx, (window, start_rect, target_rect) in enumerate(placements, start=1):
                 names = getattr(window, "group_members", [window.name])
                 logger.info(
-                    "Tile %d: [%s] - start_position: (%d,%d,%d,%d) -> final_position: (%d,%d,%d,%d)",
+                    "Tile %d: [%s] - start: (%d,%d,%d,%d) -> final: (%d,%d,%d,%d)",
                     idx,
                     ", ".join(names),
                     start_rect[0],
@@ -235,7 +231,7 @@ def get_number_of_rows_columns(window_count: int, monitor: Monitor) -> Tuple[int
     return rows, columns
 
 
-def _build_display_plan(monitor: Monitor, placements: List[tuple]) -> DisplayPlan | None:
+def _build_display_plan(monitor: Monitor, placements: List[tuple]) -> "Optional[DisplayPlan]":
     if monitor.width <= 0 or monitor.height <= 0 or not placements:
         return None
 

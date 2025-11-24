@@ -1,7 +1,7 @@
 """ASCII renderer for display/tile layouts."""
 
 from dataclasses import dataclass
-from typing import List
+from typing import List, Tuple
 
 
 @dataclass
@@ -25,6 +25,7 @@ class DisplayPlan:
     tiles: List[TilePlan]
 
     def render_ascii(self, max_width: int = 80, max_height: int = 40) -> str:
+        """Render the plan as ASCII art, preserving aspect ratio within max bounds."""
         if self.width <= 0 or self.height <= 0 or not self.tiles:
             return ""
 
@@ -38,29 +39,46 @@ class DisplayPlan:
         self._draw_border(canvas, 0, 0, width_chars + 2, height_chars + 2)
 
         for tile in self.tiles:
-            sx = 1 + int(round(tile.x * scale))
-            sy = 1 + int(round(tile.y * scale))
-            ex = sx + max(2, int(round(tile.width * scale)))
-            ey = sy + max(2, int(round(tile.height * scale)))
-
-            sx = max(1, min(sx, width_chars))
-            sy = max(1, min(sy, height_chars))
-            ex = max(sx + 1, min(ex, width_chars + 1))
-            ey = max(sy + 1, min(ey, height_chars + 1))
-
+            rect = self._tile_rect(tile, scale, width_chars, height_chars)
+            sx, sy, ex, ey = rect
             self._draw_border(canvas, sx, sy, ex - sx, ey - sy)
-
-            # Place label once near the center.
-            label = tile.label or str(tile.index)
-            label_x = sx + max(1, (ex - sx - len(label)) // 2)
-            label_y = sy + max(0, (ey - sy) // 2)
-            for i, ch in enumerate(label):
-                pos_x = label_x + i
-                if pos_x < ex - 1:
-                    canvas[label_y][pos_x] = ch
+            self._write_label(canvas, rect, tile)
 
         lines = ["".join(row).rstrip() for row in canvas]
         return "\n".join(lines)
+
+    @staticmethod
+    def _tile_rect(
+        tile: TilePlan,
+        scale: float,
+        width_chars: int,
+        height_chars: int,
+    ) -> Tuple[int, int, int, int]:
+        sx = 1 + int(round(tile.x * scale))
+        sy = 1 + int(round(tile.y * scale))
+        ex = sx + max(2, int(round(tile.width * scale)))
+        ey = sy + max(2, int(round(tile.height * scale)))
+
+        sx = max(1, min(sx, width_chars))
+        sy = max(1, min(sy, height_chars))
+        ex = max(sx + 1, min(ex, width_chars + 1))
+        ey = max(sy + 1, min(ey, height_chars + 1))
+        return sx, sy, ex, ey
+
+    @staticmethod
+    def _write_label(
+        canvas: List[List[str]],
+        rect: Tuple[int, int, int, int],
+        tile: TilePlan,
+    ) -> None:
+        label = tile.label or str(tile.index)
+        sx, sy, ex, ey = rect
+        label_x = sx + max(1, (ex - sx - len(label)) // 2)
+        label_y = sy + max(0, (ey - sy) // 2)
+        for i, ch in enumerate(label):
+            pos_x = label_x + i
+            if pos_x < ex - 1:
+                canvas[label_y][pos_x] = ch
 
     @staticmethod
     def _draw_border(canvas: List[List[str]], x: int, y: int, width: int, height: int) -> None:
