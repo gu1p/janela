@@ -1,11 +1,14 @@
 UV ?= uv
+UV_CACHE_DIR ?= .uv-cache
 VENV ?= .venv
 PYTHON := $(VENV)/bin/python3
 UNAME_S := $(shell uname -s)
 
-.PHONY: mosaic dev
+export UV_CACHE_DIR
 
-dev:
+.PHONY: install dev mosaic lint test clean
+
+install:
 	$(UV) venv $(VENV)
 	$(UV) pip install --python $(PYTHON) -e .
 	@if [ "$(UNAME_S)" = "Darwin" ]; then \
@@ -16,5 +19,17 @@ dev:
 			'pyobjc-framework-Quartz>=10,<11'; \
 	fi
 
+dev: install
+
 mosaic: dev
 	PYTHONPATH=. $(PYTHON) examples/run_mosaic.py
+
+lint: install
+	$(UV) pip install --python $(PYTHON) 'pylint>=4.0.3,<5'
+	$(PYTHON) -m pylint $(shell git ls-files '*.py')
+
+test: install
+	$(PYTHON) -m unittest
+
+clean:
+	rm -rf $(VENV)

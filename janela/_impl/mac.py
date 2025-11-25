@@ -2,6 +2,7 @@
 # pylint: disable=import-error,logging-fstring-interpolation,broad-except,invalid-name,line-too-long
 # pylint: disable=too-few-public-methods,global-statement,too-many-statements,too-many-branches
 # pylint: disable=too-many-locals,too-many-instance-attributes,too-many-arguments
+# pylint: disable=too-many-lines
 
 import ctypes
 import ctypes.util
@@ -175,7 +176,7 @@ def _cfstring_to_py(cf_string: Optional[int]) -> str:
 def _cfnumber_to_int(cf_number: Optional[int]) -> Optional[int]:
     if not cf_number:
         return None
-    value = c_longlong()
+    value = c_longlong(0)
     success = CFNumberGetValue(cf_number, kCFNumberSInt64Type, ctypes.byref(value))
     return int(value.value) if success else None
 
@@ -638,23 +639,23 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
             _safe_cf_release(size_value)
 
     def _ax_position_for(self, window: Window, x: int, y: int, height: Optional[int] = None) -> Tuple[int, int]:
-        """Convert bottom-left CG coords to top-left AX coords for positioning."""
+        """
+        Convert CG window coordinates to AX coordinates.
+
+        Both Core Graphics window bounds and Accessibility positions use the same
+        top-left origin in global display space, so we pass coordinates through.
+        """
         monitor = self.get_monitor_for_window(window)
         rect_height = height if height is not None else window.height
-        if monitor:
-            relative_bottom = y - monitor.y
-            y_ax = monitor.y + monitor.height - (relative_bottom + rect_height)
-            logger.debug(
-                "Converted CG coords (%d, %d) to AX coords (%d, %d) using monitor %s height=%d",
-                x,
-                y,
-                x,
-                y_ax,
-                monitor.id,
-                rect_height,
-            )
-            return x, y_ax
-        logger.debug("Using CG coords (%d, %d) directly for AX", x, y)
+        logger.debug(
+            "Mapping CG coords (%d, %d, h=%d) to AX coords (%d, %d) using monitor %s",
+            x,
+            y,
+            rect_height,
+            x,
+            y,
+            getattr(monitor, "id", None),
+        )
         return x, y
 
     def _get_pid_bounds(self, pid: int) -> Dict[str, Tuple[int, int, int, int]]:
@@ -984,17 +985,42 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
             window.height = height_val
 
     def get_monitor_for_window(self, window: Window) -> Optional[Monitor]:
-        logger.debug("Resolving monitor for window %s at (%d, %d)", window.id, window.x, window.y)
+        logger.debug(
+            "Resolving monitor for window %s at (%d, %d) size (%d x %d)",
+            window.id,
+            window.x,
+            window.y,
+            window.width,
+            window.height,
+        )
         monitors = self.get_monitors()
+        best_monitor: Optional[Monitor] = None
+        best_area = 0
+        wx1, wy1 = window.x, window.y
+        wx2, wy2 = window.x + window.width, window.y + window.height
+
         for monitor in monitors:
-            if (
-                monitor.x <= window.x < monitor.x + monitor.width
-                and monitor.y <= window.y < monitor.y + monitor.height
-            ):
-                logger.debug("Window %s is on monitor %s", window.id, monitor.id)
-                return monitor
-        logger.debug("No monitor contains window %s", window.id)
-        return None
+            mx1, my1 = monitor.x, monitor.y
+            mx2, my2 = monitor.x + monitor.width, monitor.y + monitor.height
+            inter_w = max(0, min(wx2, mx2) - max(wx1, mx1))
+            inter_h = max(0, min(wy2, my2) - max(wy1, my1))
+            area = inter_w * inter_h
+            if area > best_area:
+                best_area = area
+                best_monitor = monitor
+            if monitor.contains(window.x, window.y) and best_monitor is None:
+                best_monitor = monitor
+
+        if best_monitor:
+            logger.debug(
+                "Window %s assigned to monitor %s with overlap area %d",
+                window.id,
+                best_monitor.id,
+                best_area,
+            )
+        else:
+            logger.debug("No monitor contains window %s", window.id)
+        return best_monitor
 
     def move_window_to_position(self, window: Window, x: int, y: int):
         logger.info("Request to move window '%s' (%s) to (%d, %d)", window.name, window.id, x, y)

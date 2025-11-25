@@ -4,6 +4,7 @@ from janela import Janela
 
 
 def switch_active_window_to_next_display() -> None:
+    """Move the currently active window to the next monitor, if possible."""
     ja = Janela()
 
     active_window = ja.get_active_window()

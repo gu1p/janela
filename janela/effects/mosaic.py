@@ -62,8 +62,8 @@ def mosaic(ja: Janela):
                     monitor.height // 2 + (monitor.height % 2),
                     monitor.height // 2,
                 ]
-                top_y = monitor.y + monitor.height - heights[0]
-                bottom_y = monitor.y
+                top_y = monitor.y
+                bottom_y = monitor.y + heights[0]
 
                 top_window, bottom_window = windows[0], windows[1]
                 targets = [
@@ -111,8 +111,7 @@ def mosaic(ja: Janela):
                             width = base_width + (1 if col < extra_width else 0)
                             height = row_height
                             x = current_x
-                            y_top = top_offset
-                            y = monitor.y + monitor.height - (y_top + height)
+                            y = monitor.y + top_offset
                             current_x += width
 
                             logger.debug(
@@ -239,8 +238,7 @@ def _build_display_plan(monitor: Monitor, placements: List[tuple]) -> "Optional[
     for idx, (window, _, target_rect) in enumerate(placements, start=1):
         x, y, w, h = target_rect
         rel_x = x - monitor.x
-        rel_y_bottom = y - monitor.y
-        top_y = monitor.height - (rel_y_bottom + h)
+        top_y = y - monitor.y
         label = f"{idx}"
         names = getattr(window, "group_members", [window.name])
         if names:
