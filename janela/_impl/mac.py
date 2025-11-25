@@ -116,6 +116,12 @@ kAXRaiseAction = None  # type: ignore
 kAXCloseButtonAttribute = None  # type: ignore
 kAXPressAction = None  # type: ignore
 kAXWindowNumberAttribute = None  # type: ignore
+CGDisplayCopyDisplayMode = None  # type: ignore
+CGDisplayModeGetWidth = None  # type: ignore
+CGDisplayModeGetHeight = None  # type: ignore
+CGDisplayModeGetPixelWidth = None  # type: ignore
+CGDisplayModeGetPixelHeight = None  # type: ignore
+CGDisplayModeRelease = None  # type: ignore
 
 _cf_string_cache: Dict[str, c_void_p] = {}
 
@@ -226,6 +232,8 @@ def _init_mac_apis() -> None:
     global CFArrayGetCount, CFArrayGetValueAtIndex, kCFBooleanTrue, kCFBooleanFalse
     global CGWindowListCopyWindowInfo, CGGetActiveDisplayList, CGDisplayBounds, CGMainDisplayID
     global CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess
+    global CGDisplayCopyDisplayMode, CGDisplayModeGetWidth, CGDisplayModeGetHeight
+    global CGDisplayModeGetPixelWidth, CGDisplayModeGetPixelHeight, CGDisplayModeRelease
     global AXIsProcessTrustedWithOptions, AXIsProcessTrusted, AXUIElementCopyAttributeValue
     global AXUIElementCreateApplication, AXUIElementPerformAction, AXUIElementSetAttributeValue
     global AXValueCreate
@@ -279,6 +287,12 @@ def _init_mac_apis() -> None:
     )
     CGDisplayBounds = _load_symbol(CG, "CGDisplayBounds", restype=CGRect, argtypes=[c_uint32])
     CGMainDisplayID = _load_symbol(CG, "CGMainDisplayID", restype=c_uint32, argtypes=None)
+    CGDisplayCopyDisplayMode = _load_symbol(CG, "CGDisplayCopyDisplayMode", restype=c_void_p, argtypes=[c_uint32])
+    CGDisplayModeGetWidth = _load_symbol(CG, "CGDisplayModeGetWidth", restype=c_int32, argtypes=[c_void_p])
+    CGDisplayModeGetHeight = _load_symbol(CG, "CGDisplayModeGetHeight", restype=c_int32, argtypes=[c_void_p])
+    CGDisplayModeGetPixelWidth = _load_symbol(CG, "CGDisplayModeGetPixelWidth", restype=c_int32, argtypes=[c_void_p])
+    CGDisplayModeGetPixelHeight = _load_symbol(CG, "CGDisplayModeGetPixelHeight", restype=c_int32, argtypes=[c_void_p])
+    CGDisplayModeRelease = _load_symbol(CG, "CGDisplayModeRelease", restype=None, argtypes=[c_void_p])
     CGPreflightScreenCaptureAccess = _load_symbol(CG, "CGPreflightScreenCaptureAccess", restype=c_bool, argtypes=None)
     CGRequestScreenCaptureAccess = _load_symbol(CG, "CGRequestScreenCaptureAccess", restype=c_bool, argtypes=None)
 
@@ -323,6 +337,8 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
         self._cache_valid = False
         self._screen_recording_checked = False
         self._max_display_extent: Optional[int] = None
+        # Track per-display backing scale (device pixels per point) for coordinate conversions.
+        self._display_scales: Dict[int, float] = {}
         logger.debug("Starting state: caches empty, restore bounds cleared")
         self._ensure_accessibility_permissions()
         self._ensure_screen_recording_permissions()
@@ -469,6 +485,7 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
         with self._api_lock:
             count = c_uint32(0)
             monitors: List[Monitor] = []
+            self._display_scales = {}
             if not CGGetActiveDisplayList:
                 logger.debug("CoreGraphics display list function unavailable")
                 return monitors
@@ -487,6 +504,32 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
                     continue
                 bounds = CGDisplayBounds(display_id)
                 max_extent = max(max_extent, int(bounds.origin.y + bounds.size.height))
+                scale = 1.0
+                if CGDisplayCopyDisplayMode:
+                    mode = CGDisplayCopyDisplayMode(display_id)
+                    if mode:
+                        try:
+                            mode_width = CGDisplayModeGetWidth(mode) if CGDisplayModeGetWidth else 0
+                            mode_height = CGDisplayModeGetHeight(mode) if CGDisplayModeGetHeight else 0
+                            pixel_width = CGDisplayModeGetPixelWidth(mode) if CGDisplayModeGetPixelWidth else mode_width
+                            pixel_height = CGDisplayModeGetPixelHeight(mode) if CGDisplayModeGetPixelHeight else mode_height
+                            if mode_width:
+                                scale = max(scale, pixel_width / mode_width)
+                            if mode_height:
+                                scale = max(scale, pixel_height / mode_height, scale)
+                        finally:
+                            if CGDisplayModeRelease:
+                                CGDisplayModeRelease(mode)
+                self._display_scales[int(display_id)] = scale or 1.0
+                logger.debug(
+                    "Display %s scale set to %.2f (raw bounds: x=%d y=%d w=%d h=%d)",
+                    display_id,
+                    self._display_scales[int(display_id)],
+                    int(bounds.origin.x),
+                    int(bounds.origin.y),
+                    int(bounds.size.width),
+                    int(bounds.size.height),
+                )
                 monitor = Monitor(
                     wm=self,
                     id=int(display_id),
@@ -645,25 +688,37 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
         finally:
             _safe_cf_release(size_value)
 
+    def _monitor_scale(self, monitor: Optional[Monitor]) -> float:
+        """
+        Return the backing scale factor (device pixels per point) for a monitor.
+
+        Defaults to 1.0 when unknown to avoid altering coordinates on non-HiDPI displays.
+        """
+        if monitor is None:
+            return 1.0
+        scale = self._display_scales.get(monitor.id, 1.0)
+        return scale if scale > 0 else 1.0
+
     def _ax_position_for(self, window: Window, x: int, y: int, height: Optional[int] = None) -> Tuple[int, int]:
         """
-        Convert CG window coordinates to AX coordinates.
-
-        Both Core Graphics window bounds and Accessibility positions use the same
-        top-left origin in global display space, so we pass coordinates through.
+        Convert CG window coordinates (device pixels) to AX coordinates (points).
         """
         monitor = self.get_monitor_for_window(window)
         rect_height = height if height is not None else window.height
+        scale = self._monitor_scale(monitor)
+        ax_x = int(round(x / scale))
+        ax_y = int(round(y / scale))
         logger.debug(
-            "Mapping CG coords (%d, %d, h=%d) to AX coords (%d, %d) using monitor %s",
+            "Mapping CG coords (%d, %d, h=%d) to AX coords (%d, %d) using monitor %s with scale %.2f",
             x,
             y,
             rect_height,
-            x,
-            y,
+            ax_x,
+            ax_y,
             getattr(monitor, "id", None),
+            scale,
         )
-        return x, y
+        return ax_x, ax_y
 
     def _get_pid_bounds(self, pid: int) -> Dict[str, Tuple[int, int, int, int]]:
         """Return current CG bounds for a PID keyed by window id."""
@@ -1116,11 +1171,24 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
             if not ax_window:
                 logger.error(f"Could not find AX window for '{window.name}'")
                 return
-            if self._set_window_size(ax_window, width, height):
+            monitor = self.get_monitor_for_window(window)
+            scale = self._monitor_scale(monitor)
+            target_width = int(round(width / scale))
+            target_height = int(round(height / scale))
+            if self._set_window_size(ax_window, target_width, target_height):
                 self._update_cached_window(window, size=(width, height))
                 self._record_normal_bounds(window, ax_window)
                 self._invalidate_cache()
-                logger.info("Resized window '%s' (%s) to (%d, %d)", window.name, window.id, width, height)
+                logger.info(
+                    "Resized window '%s' (%s) to (%d, %d) (AX size %d x %d, scale %.2f)",
+                    window.name,
+                    window.id,
+                    width,
+                    height,
+                    target_width,
+                    target_height,
+                    scale,
+                )
             else:
                 logger.error(f"Failed to resize window '{window.name}' to ({width}, {height})")
 
