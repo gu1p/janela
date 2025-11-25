@@ -7,6 +7,7 @@ from janela import Janela
 
 
 def resize_random_window(step: int = 120, levels: int = 3, pause_seconds: float = 0.5) -> None:
+    """Interactively pick a controllable window and resize it up then back down."""
     ja = Janela()
     windows = [w for w in ja.list_windows() if ja.can_control_window(w)]
     if not windows:

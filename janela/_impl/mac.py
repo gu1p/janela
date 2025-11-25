@@ -44,6 +44,8 @@ kAXValueCGSizeType = 2
 kCGWindowListOptionAll = 0
 kCGWindowListOptionOnScreenOnly = 1
 kCGNullWindowID = 0
+# Optional opt-in to legacy coupling probe that nudges windows to detect duplicates.
+_ENABLE_COUPLED_PROBE = os.getenv("JANELA_MAC_COUPLED_PROBE", "").lower() in {"1", "true", "yes", "on"}
 
 
 def _windows_overlap(a: Window, b: Window, threshold: float = 0.9) -> bool:
@@ -745,6 +747,40 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
         logger.debug("Current max display extent: %s", self._max_display_extent)
         return self._max_display_extent or 0
 
+    @staticmethod
+    def _should_merge_records(a: _WindowRecord, b: _WindowRecord) -> bool:
+        """
+        Decide whether two records likely represent the same window.
+
+        Requirements:
+        - Same process name (avoid cross-app merges).
+        - Titles match (case-insensitive).
+        - Significant overlap (>=90% of smaller area via _windows_overlap).
+        - Similar size (within 8% per dimension).
+        - Centers within a small pixel tolerance relative to window size.
+        """
+        proc_a = getattr(a.window, "process_name", "").lower()
+        proc_b = getattr(b.window, "process_name", "").lower()
+        names_match = (a.window.name or "").lower() == (b.window.name or "").lower()
+        overlap = _windows_overlap(a.window, b.window)
+
+        w_a, h_a = a.bounds[2], a.bounds[3]
+        w_b, h_b = b.bounds[2], b.bounds[3]
+        size_tol = 0.08
+        size_close = (
+            abs(w_a - w_b) <= max(w_a, w_b) * size_tol
+            and abs(h_a - h_b) <= max(h_a, h_b) * size_tol
+        )
+
+        x_a, y_a = a.bounds[0], a.bounds[1]
+        x_b, y_b = b.bounds[0], b.bounds[1]
+        cx_a, cy_a = x_a + w_a / 2, y_a + h_a / 2
+        cx_b, cy_b = x_b + w_b / 2, y_b + h_b / 2
+        pos_tol = max(min(w_a, h_a, w_b, h_b) * 0.08, 12)
+        pos_close = abs(cx_a - cx_b) <= pos_tol and abs(cy_a - cy_b) <= pos_tol
+
+        return proc_a == proc_b and names_match and overlap and size_close and pos_close
+
     def _process_pid_records(self, pid: int, records: List[_WindowRecord]) -> List[_WindowRecord]:
         logger.debug(
             "Processing %d window record(s) for pid %d", len(records), pid
@@ -776,12 +812,24 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
             ),
         )
 
+        # Collapse exact duplicates (same name and identical bounds) without moving windows.
+        deduped: Dict[Tuple[str, Tuple[int, int, int, int]], _WindowRecord] = {}
+        for rec in filtered:
+            proc = getattr(rec.window, "process_name", "").lower()
+            sig = (proc, rec.window.name.lower(), rec.bounds)
+            existing = deduped.get(sig)
+            if existing:
+                self._merge_members(existing, rec.members)
+                continue
+            deduped[sig] = rec
+        filtered = list(deduped.values())
+
         kept: List[_WindowRecord] = []
         dropped_overlap: List[_WindowRecord] = []
         for rec in filtered:
             overlap_target = None
             for k in kept:
-                if _windows_overlap(rec.window, k.window):
+                if self._should_merge_records(rec, k):
                     overlap_target = k
                     break
             if overlap_target:
@@ -790,20 +838,12 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
                 continue
             kept.append(rec)
 
-        if len(kept) > 1:
+        if len(kept) > 1 and _ENABLE_COUPLED_PROBE:
             primary_rec = kept[0]
             others = kept[1:]
             coupled_ids = self._probe_coupled_records(pid, primary_rec, others)
             if coupled_ids:
                 kept = [r for r in kept if r.window.id not in coupled_ids]
-
-        if len(kept) > 1:
-            proc_names = {getattr(r.window, "process_name", "").lower() for r in kept}
-            if len(proc_names) == 1 and next(iter(proc_names)) == "terminal":
-                primary_rec = kept[0]
-                for rec in kept[1:]:
-                    self._merge_members(primary_rec, rec.members)
-                kept = [primary_rec]
 
         logger.debug(
             "After processing pid %d records: kept %d, dropped_small=%d, dropped_overlap=%d",
