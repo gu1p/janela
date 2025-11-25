@@ -17,11 +17,12 @@ _UHD_RESOLUTION = (3840, 2160)
 __all__ = ["mosaic"]
 
 
-def mosaic(ja: Janela):
+def mosaic(ja: Janela, unminimize_minimized: bool = True):
     """
     Arrange windows in a mosaic pattern across all monitors.
 
     :param ja: An instance of WindowManager to manage windows.
+    :param unminimize_minimized: When True (default), restore minimized windows before tiling.
     """
     # Get all monitors
     monitors = ja.list_monitors()
@@ -35,6 +36,27 @@ def mosaic(ja: Janela):
             ]
             # Filter out windows we cannot control (e.g., AX-inaccessible apps on macOS).
             windows = [w for w in windows if ja.can_control_window(w)]
+            if unminimize_minimized:
+                for window in list(windows):
+                    try:
+                        if ja.is_window_minimized(window):
+                            ja.unminimize_window(window)
+                    except Exception as exc:  # pylint: disable=broad-except
+                        logger.debug(
+                            "Could not unminimize '%s': %s",
+                            getattr(window, "name", window.id),
+                            exc,
+                        )
+                # Refresh window list to capture updated bounds after unminimize.
+                windows = [
+                    w
+                    for w in ja.list_windows()
+                    if w.monitor == monitor and ja.can_control_window(w)
+                ]
+            else:
+                # Drop minimized windows to avoid allocating tiles for invisible windows.
+                windows = [w for w in windows if not ja.is_window_minimized(w)]
+
             if not windows:
                 continue  # Skip monitors with no windows
 

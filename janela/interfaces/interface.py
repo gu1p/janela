@@ -204,6 +204,30 @@ class Janela(ABC):  # pylint: disable=too-many-public-methods
         """
         raise NotImplementedError
 
+    @abstractmethod
+    def is_window_minimized(self, window: Window) -> bool:
+        """
+        Check if the window is minimized.
+
+        :param window: The window to check.
+        :return: True if minimized, False otherwise.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def unminimize_window(self, window: Window) -> None:
+        """
+        Restore a minimized window to a usable size and position.
+
+        Implementations should attempt to return the window to its last known
+        normal (non-minimized, non-maximized) bounds; if that information is
+        unavailable, they should fall back to a reasonable default size and
+        monitor.
+
+        :param window: The window to restore.
+        """
+        raise NotImplementedError
+
     def can_control_window(self, window: Window) -> bool:
         """
         Check if this backend can control the given window (move/resize).

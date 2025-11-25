@@ -17,6 +17,7 @@ from typing import Dict, List, Optional, Tuple
 from janela.interfaces import Janela
 from janela.interfaces.models import Monitor, Window
 from janela.logger import logger
+from janela.util.restore import fallback_restore_bounds
 
 
 # Core Foundation / Core Graphics / Accessibility bindings are kept lightweight to avoid
@@ -969,6 +970,7 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
             else:
                 records_by_pid.setdefault(window_obj.pid, []).append(record)
             self._window_by_id[window_id] = window_obj
+            self._record_normal_bounds(window_obj, ax_window)
         logger.debug(
             "Window records grouped: %d with pid, %d without pid",
             len(records_by_pid),
@@ -1032,6 +1034,27 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
             window.width = width_val
             window.height = height_val
 
+    def _record_normal_bounds(self, window: Window, ax_window: Optional[c_void_p] = None) -> None:
+        """
+        Remember the last seen non-minimized, non-maximized bounds for a window.
+
+        This enables restores/unminimize even if the user triggered maximize/minimize
+        manually outside Janela.
+        """
+        try:
+            minimized = (
+                self._is_ax_window_minimized(ax_window)
+                if ax_window is not None
+                else self.is_window_minimized(window)
+            )
+            if minimized:
+                return
+            if self.is_window_maximized(window):
+                return
+            self._restore_bounds[window.id] = (window.x, window.y, window.width, window.height)
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.debug("Unable to record bounds for window %s: %s", window.id, exc)
+
     def get_monitor_for_window(self, window: Window) -> Optional[Monitor]:
         logger.debug(
             "Resolving monitor for window %s at (%d, %d) size (%d x %d)",
@@ -1080,6 +1103,7 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
             ax_x, ax_y = self._ax_position_for(window, x, y)
             if self._set_window_position(ax_window, ax_x, ax_y):
                 self._update_cached_window(window, position=(x, y))
+                self._record_normal_bounds(window, ax_window)
                 self._invalidate_cache()
                 logger.info("Moved window '%s' (%s) to (%d, %d)", window.name, window.id, x, y)
             else:
@@ -1094,6 +1118,7 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
                 return
             if self._set_window_size(ax_window, width, height):
                 self._update_cached_window(window, size=(width, height))
+                self._record_normal_bounds(window, ax_window)
                 self._invalidate_cache()
                 logger.info("Resized window '%s' (%s) to (%d, %d)", window.name, window.id, width, height)
             else:
@@ -1102,6 +1127,7 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
     def minimize_window(self, window: Window):
         logger.info("Request to minimize window '%s' (%s)", window.name, window.id)
         with self._api_lock:
+            self._record_normal_bounds(window)
             ax_window = self._find_ax_window(window)
             if not ax_window:
                 logger.error(f"Could not find AX window for '{window.name}'")
@@ -1250,6 +1276,11 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
             logger.debug("Monitor %s not found", monitor_id)
             return None
 
+    def is_window_minimized(self, window: Window) -> bool:
+        with self._api_lock:
+            ax_window = self._find_ax_window(window)
+            return self._is_ax_window_minimized(ax_window) is True
+
     def is_window_maximized(self, window: Window) -> bool:
         with self._api_lock:
             monitor = self.get_monitor_for_window(window)
@@ -1265,6 +1296,35 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
             logger.debug("Cannot determine maximized state for window %s without monitor", window.id)
             return False
 
+    def unminimize_window(self, window: Window) -> None:  # pylint: disable=duplicate-code
+        logger.info("Request to unminimize window '%s' (%s)", window.name, window.id)
+        with self._api_lock:
+            ax_window = self._find_ax_window(window)
+            if not ax_window:
+                logger.error(f"Could not find AX window for '{window.name}'")
+                return
+            err = AXUIElementSetAttributeValue(ax_window, kAXMinimizedAttribute, kCFBooleanFalse)
+            if err != kAXErrorSuccess:
+                logger.error("Failed to unminimize window '%s'", window.name)
+                return
+
+            restore = self._restore_bounds.get(window.id)
+            if restore:
+                x, y, width, height = restore
+                self.move_window_to_position(window, x, y)
+                self.resize_window(window, width, height)
+            else:
+                monitor = self.get_monitor_for_window(window)
+                monitors = self.get_monitors()
+                x, y, width, height = fallback_restore_bounds(window, monitor, monitors)
+                if monitors:
+                    self.resize_window(window, width, height)
+                    self.move_window_to_position(window, x, y)
+                else:
+                    logger.debug("No monitor available for fallback restore of %s", window.id)
+            self._invalidate_cache()
+            self._record_normal_bounds(window, ax_window)
+
     def unmaximize_window(self, window: Window) -> None:
         with self._api_lock:
             restore = self._restore_bounds.get(window.id)
@@ -1273,9 +1333,16 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
                 logger.info("Restoring window '%s' (%s) to saved bounds %s", window.name, window.id, restore)
                 self.move_window_to_position(window, x, y)
                 self.resize_window(window, width, height)
+                self._record_normal_bounds(window)
                 return
             logger.info("No restore bounds for window '%s' (%s); resizing to half dimensions", window.name, window.id)
-            self.resize_window(window, max(800, window.width // 2), max(600, window.height // 2))
+            monitors = self.get_monitors()
+            monitor = self.get_monitor_for_window(window)
+            x, y, width, height = fallback_restore_bounds(window, monitor, monitors)
+            if monitors:
+                self.resize_window(window, width, height)
+                self.move_window_to_position(window, x, y)
+            self._record_normal_bounds(window)
 
     def can_control_window(self, window: Window) -> bool:
         with self._api_lock:

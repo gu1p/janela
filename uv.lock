@@ -223,7 +223,7 @@ wheels = [
 
 [[package]]
 name = "janela"
-version = "0.0.13"
+version = "0.0.15"
 source = { editable = "." }
 dependencies = [
     { name = "pyobjc-core", marker = "sys_platform == 'darwin'" },

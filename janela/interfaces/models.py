@@ -151,6 +151,14 @@ class Window:  # pylint: disable=too-many-instance-attributes
         """Restore from maximized state."""
         self.wm.unmaximize_window(self)
 
+    def is_minimized(self) -> bool:
+        """Check minimized state."""
+        return self.wm.is_window_minimized(self)
+
+    def unminimize(self) -> None:
+        """Restore a minimized window."""
+        self.wm.unminimize_window(self)
+
     def focus(self):
         """Focus window."""
         self.wm.focus_window(self)

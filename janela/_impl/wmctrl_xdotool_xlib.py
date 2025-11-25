@@ -1,7 +1,7 @@
 """Linux implementation using wmctrl/xdotool/Xlib."""
 # pylint: disable=import-error,logging-fstring-interpolation,line-too-long
 
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from Xlib import display, X
 
@@ -9,9 +9,10 @@ from janela.interfaces.interface import Janela
 from janela.interfaces.models import Monitor, Window
 from janela.logger import logger
 from janela.util.cmd import run_command
+from janela.util.restore import fallback_restore_bounds
 
 
-class LinuxImpl(Janela):
+class LinuxImpl(Janela):  # pylint: disable=too-many-public-methods
     """Linux-specific window management implementation."""
     def __init__(self, xdotool_path: str, wmctrl_path: str):
         """
@@ -22,6 +23,7 @@ class LinuxImpl(Janela):
         """
         self.xdotool_path = xdotool_path
         self.wmctrl_path = wmctrl_path
+        self._normal_bounds: Dict[str, Tuple[int, int, int, int]] = {}
         self.display = display.Display()
 
     def get_monitors(self) -> List[Monitor]:
@@ -72,9 +74,9 @@ class LinuxImpl(Janela):
                 window_id_hex = f"0x{int(window_id, 16):x}"
                 x, y, width, height = map(int, [x, y, width, height])
                 is_active = window_id_hex.lower() == active_window_id.lower()
-                windows.append(
-                    Window(window_id_hex, name, x, y, width, height, is_active, self)
-                )
+                window_obj = Window(window_id_hex, name, x, y, width, height, is_active, self)
+                windows.append(window_obj)
+                self._record_normal_bounds(window_obj)
             except ValueError as e:
                 logger.error(f"Error parsing window data: {e}")
                 continue
@@ -93,6 +95,7 @@ class LinuxImpl(Janela):
         )
         if result is not None:
             window.x, window.y = x, y
+            self._record_normal_bounds(window)
         else:
             logger.error(f"Failed to move window {window.name} to position ({x}, {y})")
 
@@ -112,17 +115,21 @@ class LinuxImpl(Janela):
         )
         if result is not None:
             window.width, window.height = width, height
+            self._record_normal_bounds(window)
         else:
             logger.error(
                 f"Failed to resize window {window.name} to ({width}, {height})"
             )
 
     def minimize_window(self, window: Window):
+        # Capture last known usable bounds before minimizing.
+        self._record_normal_bounds(window)
         result = run_command([self.xdotool_path, "windowminimize", window.id])
         if result is None:
             logger.error(f"Failed to minimize window {window.name}")
 
     def maximize_window(self, window: Window):
+        self._record_normal_bounds(window)
         result = run_command(
             [
                 self.wmctrl_path,
@@ -269,24 +276,44 @@ class LinuxImpl(Janela):
                 return monitor
         return None
 
-    def is_window_maximized(self, window: Window) -> bool:
+    def _get_wm_state_atoms(self, window: Window) -> list:
         try:
             win = self.display.create_resource_object("window", int(window.id, 16))
             wm_state = win.get_full_property(
                 self.display.intern_atom("_NET_WM_STATE"), X.AnyPropertyType
             )
-            if wm_state:
-                atoms = wm_state.value
-                maximized_vert = self.display.intern_atom(
-                    "_NET_WM_STATE_MAXIMIZED_VERT"
-                )
-                maximized_horz = self.display.intern_atom(
-                    "_NET_WM_STATE_MAXIMIZED_HORZ"
-                )
-                return maximized_vert in atoms and maximized_horz in atoms
+            return list(wm_state.value) if wm_state else []
         except Exception as e:  # pylint: disable=broad-except
-            logger.error("Error checking if window %s is maximized: %s", window.name, e)
-        return False
+            logger.error("Error fetching _NET_WM_STATE for %s: %s", window.name, e)
+        return []
+
+    def is_window_maximized(self, window: Window) -> bool:
+        atoms = self._get_wm_state_atoms(window)
+        if not atoms:
+            return False
+        maximized_vert = self.display.intern_atom("_NET_WM_STATE_MAXIMIZED_VERT")
+        maximized_horz = self.display.intern_atom("_NET_WM_STATE_MAXIMIZED_HORZ")
+        return maximized_vert in atoms and maximized_horz in atoms
+
+    def is_window_minimized(self, window: Window) -> bool:
+        atoms = self._get_wm_state_atoms(window)
+        if not atoms:
+            return False
+        minimized_atom = self.display.intern_atom("_NET_WM_STATE_HIDDEN")
+        return minimized_atom in atoms
+
+    def unminimize_window(self, window: Window) -> None:
+        result = run_command([self.xdotool_path, "windowmap", window.id])
+        if result is None:
+            logger.error(f"Failed to unminimize window {window.name}")
+            return
+        restore = self._normal_bounds.get(window.id)
+        if restore:
+            x, y, width, height = restore
+            self._apply_geometry(window, (x, y, width, height))
+        else:
+            self._apply_default_restore(window)
+        self._record_normal_bounds(window)
 
     def unmaximize_window(self, window: Window):
         result = run_command(
@@ -300,3 +327,36 @@ class LinuxImpl(Janela):
         )
         if result is None:
             logger.error(f"Failed to unmaximize window {window.name}")
+            return
+
+        restore = self._normal_bounds.get(window.id)
+        if restore:
+            x, y, width, height = restore
+            self._apply_geometry(window, (x, y, width, height))
+        else:
+            self._apply_default_restore(window)
+
+    def _record_normal_bounds(self, window: Window) -> None:
+        """Track last known non-minimized/non-maximized bounds for restoration."""
+        try:
+            if self.is_window_minimized(window):
+                return
+            if self.is_window_maximized(window):
+                return
+            self._normal_bounds[window.id] = (window.x, window.y, window.width, window.height)
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.debug("Unable to record bounds for window %s: %s", window.id, exc)
+
+    def _apply_geometry(self, window: Window, geometry: Tuple[int, int, int, int]) -> None:
+        x, y, width, height = geometry
+        result = run_command([self.wmctrl_path, "-ir", window.id, "-e", f"0,{x},{y},{width},{height}"])
+        if result is None:
+            logger.error("Failed to apply geometry to window %s", window.name)
+            return
+        window.x, window.y, window.width, window.height = x, y, width, height
+
+    def _apply_default_restore(self, window: Window) -> None:
+        monitor = self.get_monitor_for_window(window)
+        monitors = self.get_monitors()
+        x, y, width, height = fallback_restore_bounds(window, monitor, monitors)
+        self._apply_geometry(window, (x, y, width, height))

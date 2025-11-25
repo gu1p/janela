@@ -1,3 +1,4 @@
+# pylint: disable=duplicate-code
 """Tests for directional window resizing against monitor bounds."""
 
 import unittest

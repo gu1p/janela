@@ -16,7 +16,7 @@ A simple Python package for managing and manipulating application windows on **G
 
 - **Move windows between monitors**: Easily transfer windows from one monitor to another.
 - **Resize windows**: Adjust the size of windows programmatically.
-- **Maximize and minimize windows**: Control window states effortlessly.
+- **Maximize, minimize, and restore windows**: Control window states effortlessly.
 - **Focus on windows**: Bring specific windows to the foreground.
 - **Close windows**: Programmatically close application windows.
 - **Arrange windows in mosaic patterns**: Organize your windows in a mosaic layout across your monitors.
@@ -171,6 +171,10 @@ if window:
 
   # Minimize the window
   window.minimize()
+
+  # Restore a minimized window (falls back to a sane size if no cached bounds)
+  if window.is_minimized():
+    window.unminimize()
 ```
 
 ### Focusing and Closing Windows
@@ -204,6 +208,8 @@ The `WindowManager` class is the main interface to manage windows and monitors.
 - `get_active_window()`: Get the currently active window.
 - `get_window_by_name(name)`: Get a window by its name.
 - `get_monitor_by_id(monitor_id)`: Get a monitor by its ID.
+- `is_window_minimized(window)`: Check if a window is minimized.
+- `unminimize_window(window)`: Restore a minimized window (uses cached bounds when available).
 
 ### Window
 
@@ -231,6 +237,8 @@ Represents a window in the system.
 - `move_to_monitor(monitor)`: Move the window to the specified monitor.
 - `is_maximized()`: Check if the window is maximized.
 - `unmaximize()`: Unmaximize the window.
+- `is_minimized()`: Check if the window is minimized.
+- `unminimize()`: Restore a minimized window.
 - `focus()`: Bring the window to the foreground.
 - `close()`: Close the window.
 
