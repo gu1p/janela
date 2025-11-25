@@ -9,6 +9,7 @@ import ctypes.util
 import os
 import plistlib
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -311,6 +312,7 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
         logger.debug("Initializing macOS implementation")
         _init_mac_apis()
 
+        self._api_lock = threading.RLock()
         self._restore_bounds: Dict[str, Tuple[int, int, int, int]] = {}
         self._warned_screen_recording = False
         self._ax_missing_window_ids: set[str] = set()
@@ -463,44 +465,45 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
 
     def get_monitors(self) -> List[Monitor]:
         logger.info("Enumerating monitors")
-        count = c_uint32(0)
-        monitors: List[Monitor] = []
-        if not CGGetActiveDisplayList:
-            logger.debug("CoreGraphics display list function unavailable")
-            return monitors
+        with self._api_lock:
+            count = c_uint32(0)
+            monitors: List[Monitor] = []
+            if not CGGetActiveDisplayList:
+                logger.debug("CoreGraphics display list function unavailable")
+                return monitors
 
-        CGGetActiveDisplayList(0, None, ctypes.byref(count))
-        if count.value == 0:
-            logger.debug("No monitors reported by CoreGraphics")
-            return monitors
+            CGGetActiveDisplayList(0, None, ctypes.byref(count))
+            if count.value == 0:
+                logger.debug("No monitors reported by CoreGraphics")
+                return monitors
 
-        display_ids = (c_uint32 * count.value)()
-        CGGetActiveDisplayList(count.value, display_ids, ctypes.byref(count))
+            display_ids = (c_uint32 * count.value)()
+            CGGetActiveDisplayList(count.value, display_ids, ctypes.byref(count))
 
-        max_extent = 0
-        for display_id in display_ids[: count.value]:
-            if not CGDisplayBounds:
-                continue
-            bounds = CGDisplayBounds(display_id)
-            max_extent = max(max_extent, int(bounds.origin.y + bounds.size.height))
-            monitor = Monitor(
-                wm=self,
-                id=int(display_id),
-                name=f"Display {display_id}",
-                width=int(bounds.size.width),
-                height=int(bounds.size.height),
-                x=int(bounds.origin.x),
-                y=int(bounds.origin.y),
+            max_extent = 0
+            for display_id in display_ids[: count.value]:
+                if not CGDisplayBounds:
+                    continue
+                bounds = CGDisplayBounds(display_id)
+                max_extent = max(max_extent, int(bounds.origin.y + bounds.size.height))
+                monitor = Monitor(
+                    wm=self,
+                    id=int(display_id),
+                    name=f"Display {display_id}",
+                    width=int(bounds.size.width),
+                    height=int(bounds.size.height),
+                    x=int(bounds.origin.x),
+                    y=int(bounds.origin.y),
+                )
+                monitors.append(monitor)
+            if max_extent > 0:
+                self._max_display_extent = max_extent
+            logger.info(
+                "Detected %d monitor(s); max display extent=%s",
+                len(monitors),
+                self._max_display_extent,
             )
-            monitors.append(monitor)
-        if max_extent > 0:
-            self._max_display_extent = max_extent
-        logger.info(
-            "Detected %d monitor(s); max display extent=%s",
-            len(monitors),
-            self._max_display_extent,
-        )
-        return monitors
+            return monitors
 
     def _active_window_from_list(self, window_list: List[dict]) -> str:
         for win in window_list:
@@ -511,10 +514,11 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
         return ""
 
     def get_active_window_id(self) -> str:
-        window_list = self._get_window_list(kCGWindowListOptionOnScreenOnly)
-        active_id = self._active_window_from_list(window_list)
-        logger.info("Active window id resolved to: %s", active_id)
-        return active_id
+        with self._api_lock:
+            window_list = self._get_window_list(kCGWindowListOptionOnScreenOnly)
+            active_id = self._active_window_from_list(window_list)
+            logger.info("Active window id resolved to: %s", active_id)
+            return active_id
 
     def _copy_attribute(self, element: c_void_p, attribute: c_void_p) -> Tuple[int, Optional[int]]:
         if not element:
@@ -867,6 +871,10 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
         return kept
 
     def list_windows(self) -> List[Window]:
+        with self._api_lock:
+            return self._list_windows_unlocked()
+
+    def _list_windows_unlocked(self) -> List[Window]:
         logger.info(
             "Listing windows (cache_valid=%s, cached=%d)",
             self._cache_valid,
@@ -1064,68 +1072,73 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
 
     def move_window_to_position(self, window: Window, x: int, y: int):
         logger.info("Request to move window '%s' (%s) to (%d, %d)", window.name, window.id, x, y)
-        ax_window = self._find_ax_window(window)
-        if not ax_window:
-            logger.error(f"Could not find AX window for '{window.name}'")
-            return
-        ax_x, ax_y = self._ax_position_for(window, x, y)
-        if self._set_window_position(ax_window, ax_x, ax_y):
-            self._update_cached_window(window, position=(x, y))
-            self._invalidate_cache()
-            logger.info("Moved window '%s' (%s) to (%d, %d)", window.name, window.id, x, y)
-        else:
-            logger.error(f"Failed to move window '{window.name}' to ({x}, {y})")
+        with self._api_lock:
+            ax_window = self._find_ax_window(window)
+            if not ax_window:
+                logger.error(f"Could not find AX window for '{window.name}'")
+                return
+            ax_x, ax_y = self._ax_position_for(window, x, y)
+            if self._set_window_position(ax_window, ax_x, ax_y):
+                self._update_cached_window(window, position=(x, y))
+                self._invalidate_cache()
+                logger.info("Moved window '%s' (%s) to (%d, %d)", window.name, window.id, x, y)
+            else:
+                logger.error(f"Failed to move window '{window.name}' to ({x}, {y})")
 
     def resize_window(self, window: Window, width: int, height: int):
         logger.info("Request to resize window '%s' (%s) to (%d, %d)", window.name, window.id, width, height)
-        ax_window = self._find_ax_window(window)
-        if not ax_window:
-            logger.error(f"Could not find AX window for '{window.name}'")
-            return
-        if self._set_window_size(ax_window, width, height):
-            self._update_cached_window(window, size=(width, height))
-            self._invalidate_cache()
-            logger.info("Resized window '%s' (%s) to (%d, %d)", window.name, window.id, width, height)
-        else:
-            logger.error(f"Failed to resize window '{window.name}' to ({width}, {height})")
+        with self._api_lock:
+            ax_window = self._find_ax_window(window)
+            if not ax_window:
+                logger.error(f"Could not find AX window for '{window.name}'")
+                return
+            if self._set_window_size(ax_window, width, height):
+                self._update_cached_window(window, size=(width, height))
+                self._invalidate_cache()
+                logger.info("Resized window '%s' (%s) to (%d, %d)", window.name, window.id, width, height)
+            else:
+                logger.error(f"Failed to resize window '{window.name}' to ({width}, {height})")
 
     def minimize_window(self, window: Window):
         logger.info("Request to minimize window '%s' (%s)", window.name, window.id)
-        ax_window = self._find_ax_window(window)
-        if not ax_window:
-            logger.error(f"Could not find AX window for '{window.name}'")
-            return
-        err = AXUIElementSetAttributeValue(ax_window, kAXMinimizedAttribute, kCFBooleanTrue)
-        if err != kAXErrorSuccess:
-            logger.error(f"Failed to minimize window '{window.name}'")
-        else:
-            logger.info("Minimized window '%s' (%s)", window.name, window.id)
-            self._invalidate_cache()
+        with self._api_lock:
+            ax_window = self._find_ax_window(window)
+            if not ax_window:
+                logger.error(f"Could not find AX window for '{window.name}'")
+                return
+            err = AXUIElementSetAttributeValue(ax_window, kAXMinimizedAttribute, kCFBooleanTrue)
+            if err != kAXErrorSuccess:
+                logger.error(f"Failed to minimize window '{window.name}'")
+            else:
+                logger.info("Minimized window '%s' (%s)", window.name, window.id)
+                self._invalidate_cache()
 
     def maximize_window(self, window: Window):
         logger.info("Request to maximize window '%s' (%s)", window.name, window.id)
-        monitor = self.get_monitor_for_window(window)
-        if monitor:
-            self._restore_bounds[window.id] = (
-                window.x,
-                window.y,
-                window.width,
-                window.height,
-            )
-            logger.debug(
-                "Stored restore bounds for window %s: %s",
-                window.id,
-                self._restore_bounds[window.id],
-            )
-            self.resize_window(window, monitor.width, monitor.height)
-            self.move_window_to_position(window, monitor.x, monitor.y)
-            logger.info("Maximized window '%s' on monitor %s", window.name, monitor.id)
+        with self._api_lock:
+            monitor = self.get_monitor_for_window(window)
+            if monitor:
+                self._restore_bounds[window.id] = (
+                    window.x,
+                    window.y,
+                    window.width,
+                    window.height,
+                )
+                logger.debug(
+                    "Stored restore bounds for window %s: %s",
+                    window.id,
+                    self._restore_bounds[window.id],
+                )
+                self.resize_window(window, monitor.width, monitor.height)
+                self.move_window_to_position(window, monitor.x, monitor.y)
+                logger.info("Maximized window '%s' on monitor %s", window.name, monitor.id)
 
     def move_to_monitor(self, window: Window, monitor: Monitor):
         logger.info("Moving window '%s' (%s) to monitor %s", window.name, window.id, monitor.id)
-        target_x = monitor.x + (monitor.width - window.width) // 2
-        target_y = monitor.y + (monitor.height - window.height) // 2
-        self.move_window_to_position(window, target_x, target_y)
+        with self._api_lock:
+            target_x = monitor.x + (monitor.width - window.width) // 2
+            target_y = monitor.y + (monitor.height - window.height) // 2
+            self.move_window_to_position(window, target_x, target_y)
 
     def verify_window_move(
         self, window: Window, target_monitor: Monitor, expected_x: int, expected_y: int
@@ -1155,46 +1168,49 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
 
     def get_window_by_id(self, window_id: str) -> Optional[Window]:
         logger.debug("Fetching window by id=%s (cache_valid=%s)", window_id, self._cache_valid)
-        if not self._cache_valid:
-            self.list_windows()
-        cached = self._window_by_id.get(window_id)
-        if cached:
-            logger.debug("Found window %s in cache", window_id)
-            return cached
-        logger.debug("Window %s not found in cache", window_id)
-        return None
+        with self._api_lock:
+            if not self._cache_valid:
+                self.list_windows()
+            cached = self._window_by_id.get(window_id)
+            if cached:
+                logger.debug("Found window %s in cache", window_id)
+                return cached
+            logger.debug("Window %s not found in cache", window_id)
+            return None
 
     def focus_window(self, window: Window):
         logger.info("Request to focus window '%s' (%s)", window.name, window.id)
-        ax_window = self._find_ax_window(window)
-        if not ax_window:
-            logger.error(f"Could not find AX window for '{window.name}'")
-            return
-        err = AXUIElementPerformAction(ax_window, kAXRaiseAction)
-        if err == kAXErrorSuccess:
-            window.is_active = True
-            logger.info("Focused window '%s' (%s)", window.name, window.id)
-        else:
-            logger.error(f"Failed to focus window '{window.name}'")
+        with self._api_lock:
+            ax_window = self._find_ax_window(window)
+            if not ax_window:
+                logger.error(f"Could not find AX window for '{window.name}'")
+                return
+            err = AXUIElementPerformAction(ax_window, kAXRaiseAction)
+            if err == kAXErrorSuccess:
+                window.is_active = True
+                logger.info("Focused window '%s' (%s)", window.name, window.id)
+            else:
+                logger.error(f"Failed to focus window '{window.name}'")
 
     def close_window(self, window: Window):
         logger.info("Request to close window '%s' (%s)", window.name, window.id)
-        ax_window = self._find_ax_window(window)
-        if not ax_window:
-            logger.error(f"Could not find AX window for '{window.name}'")
-            return
-        err, close_button = self._copy_attribute(ax_window, kAXCloseButtonAttribute)
-        try:
-            if err == kAXErrorSuccess and close_button:
-                press_err = AXUIElementPerformAction(close_button, kAXPressAction)
-                if press_err != kAXErrorSuccess:
-                    logger.error(f"Failed to close window '{window.name}' via close button")
-            else:
-                logger.error(f"No close button available for '{window.name}'")
-            self._invalidate_cache()
-            logger.info("Closed window '%s' (%s)", window.name, window.id)
-        finally:
-            _safe_cf_release(close_button)
+        with self._api_lock:
+            ax_window = self._find_ax_window(window)
+            if not ax_window:
+                logger.error(f"Could not find AX window for '{window.name}'")
+                return
+            err, close_button = self._copy_attribute(ax_window, kAXCloseButtonAttribute)
+            try:
+                if err == kAXErrorSuccess and close_button:
+                    press_err = AXUIElementPerformAction(close_button, kAXPressAction)
+                    if press_err != kAXErrorSuccess:
+                        logger.error(f"Failed to close window '{window.name}' via close button")
+                else:
+                    logger.error(f"No close button available for '{window.name}'")
+                self._invalidate_cache()
+                logger.info("Closed window '%s' (%s)", window.name, window.id)
+            finally:
+                _safe_cf_release(close_button)
 
     def list_monitors(self) -> List[Monitor]:
         monitors = sorted(self.get_monitors(), key=lambda m: m.name)
@@ -1202,10 +1218,11 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
         return monitors
 
     def get_active_window(self) -> Optional[Window]:
-        active_window_id = self.get_active_window_id()
-        active_window = self.get_window_by_id(active_window_id)
-        logger.info("Active window resolved to %s", getattr(active_window, "id", None))
-        return active_window
+        with self._api_lock:
+            active_window_id = self.get_active_window_id()
+            active_window = self.get_window_by_id(active_window_id)
+            logger.info("Active window resolved to %s", getattr(active_window, "id", None))
+            return active_window
 
     def verify_window_positions(self) -> bool:
         logger.debug("Verifying window positions (macOS stub returns True)")
@@ -1213,50 +1230,55 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
 
     def get_window_by_name(self, name: str) -> Optional[Window]:
         logger.debug("Searching for window by exact name '%s'", name)
-        window_list = self.list_windows()
-        for window in window_list:
-            if window.name == name:
-                logger.debug("Found window by name '%s' with id %s", name, window.id)
-                return window
-        logger.debug("No window found with name '%s'", name)
-        return None
+        with self._api_lock:
+            window_list = self.list_windows()
+            for window in window_list:
+                if window.name == name:
+                    logger.debug("Found window by name '%s' with id %s", name, window.id)
+                    return window
+            logger.debug("No window found with name '%s'", name)
+            return None
 
     def get_monitor_by_id(self, monitor_id: int) -> Optional[Monitor]:
         logger.debug("Searching for monitor by id %s", monitor_id)
-        monitors = self.get_monitors()
-        for monitor in monitors:
-            if monitor.id == monitor_id:
-                logger.debug("Found monitor %s", monitor.id)
-                return monitor
-        logger.debug("Monitor %s not found", monitor_id)
-        return None
+        with self._api_lock:
+            monitors = self.get_monitors()
+            for monitor in monitors:
+                if monitor.id == monitor_id:
+                    logger.debug("Found monitor %s", monitor.id)
+                    return monitor
+            logger.debug("Monitor %s not found", monitor_id)
+            return None
 
     def is_window_maximized(self, window: Window) -> bool:
-        monitor = self.get_monitor_for_window(window)
-        if monitor:
-            maximized = (
-                window.x == monitor.x
-                and window.y == monitor.y
-                and window.width == monitor.width
-                and window.height == monitor.height
-            )
-            logger.debug("Window %s maximized=%s on monitor %s", window.id, maximized, monitor.id)
-            return maximized
-        logger.debug("Cannot determine maximized state for window %s without monitor", window.id)
-        return False
+        with self._api_lock:
+            monitor = self.get_monitor_for_window(window)
+            if monitor:
+                maximized = (
+                    window.x == monitor.x
+                    and window.y == monitor.y
+                    and window.width == monitor.width
+                    and window.height == monitor.height
+                )
+                logger.debug("Window %s maximized=%s on monitor %s", window.id, maximized, monitor.id)
+                return maximized
+            logger.debug("Cannot determine maximized state for window %s without monitor", window.id)
+            return False
 
     def unmaximize_window(self, window: Window) -> None:
-        restore = self._restore_bounds.get(window.id)
-        if restore:
-            x, y, width, height = restore
-            logger.info("Restoring window '%s' (%s) to saved bounds %s", window.name, window.id, restore)
-            self.move_window_to_position(window, x, y)
-            self.resize_window(window, width, height)
-            return
-        logger.info("No restore bounds for window '%s' (%s); resizing to half dimensions", window.name, window.id)
-        self.resize_window(window, max(800, window.width // 2), max(600, window.height // 2))
+        with self._api_lock:
+            restore = self._restore_bounds.get(window.id)
+            if restore:
+                x, y, width, height = restore
+                logger.info("Restoring window '%s' (%s) to saved bounds %s", window.name, window.id, restore)
+                self.move_window_to_position(window, x, y)
+                self.resize_window(window, width, height)
+                return
+            logger.info("No restore bounds for window '%s' (%s); resizing to half dimensions", window.name, window.id)
+            self.resize_window(window, max(800, window.width // 2), max(600, window.height // 2))
 
     def can_control_window(self, window: Window) -> bool:
-        can_control = self._find_ax_window(window, log_missing=False) is not None
-        logger.debug("Control check for window '%s' (%s): %s", window.name, window.id, can_control)
-        return can_control
+        with self._api_lock:
+            can_control = self._find_ax_window(window, log_missing=False) is not None
+            logger.debug("Control check for window '%s' (%s): %s", window.name, window.id, can_control)
+            return can_control

@@ -29,7 +29,7 @@ lint: install
 	$(PYTHON) -m pylint $(shell git ls-files '*.py')
 
 test: install
-	$(PYTHON) -m unittest
+	$(PYTHON) -m unittest discover -s tests -p "test*.py"
 
 clean:
 	rm -rf $(VENV)

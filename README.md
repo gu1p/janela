@@ -143,6 +143,12 @@ if window:
 
   # Resize the window to width 800 and height 600
   window.resize(800, 600)
+
+  # Grow 120px to the right without leaving the current monitor
+  window.resize_right(120)
+
+  # Grow 80px upward while keeping the bottom edge fixed
+  window.resize_top(80)
 ```
 
 ### Maximizing and Minimizing Windows
@@ -216,6 +222,10 @@ Represents a window in the system.
 - `set_position(x, y)`: Move the window to the specified position.
 - `move(x, y)`: Move the window by the specified offset.
 - `resize(width, height)`: Resize the window.
+- `resize_left(delta)`: Increase width toward the left within the current monitor.
+- `resize_right(delta)`: Increase width toward the right within the current monitor.
+- `resize_top(delta)`: Increase height upward within the current monitor.
+- `resize_down(delta)`: Increase height downward within the current monitor.
 - `minimize()`: Minimize the window.
 - `maximize()`: Maximize the window.
 - `move_to_monitor(monitor)`: Move the window to the specified monitor.

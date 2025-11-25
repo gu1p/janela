@@ -75,6 +75,62 @@ class Window:  # pylint: disable=too-many-instance-attributes
         """Resize window."""
         self.wm.resize_window(self, width, height)
 
+    def resize_left(self, delta: int):
+        """Increase width toward the left, staying within the current monitor."""
+        if delta <= 0:
+            return
+        monitor = self.monitor
+        allowed = delta if monitor is None else min(delta, max(0, self.x - monitor.x))
+        if allowed <= 0:
+            return
+        new_x = self.x - allowed
+        new_width = self.width + allowed
+        self.set_position(new_x, self.y)
+        self.resize(new_width, self.height)
+
+    def resize_right(self, delta: int):
+        """Increase width toward the right, staying within the current monitor."""
+        if delta <= 0:
+            return
+        monitor = self.monitor
+        if monitor is None:
+            allowed = delta
+        else:
+            right_edge = self.x + self.width
+            available = monitor.x + monitor.width - right_edge
+            allowed = min(delta, max(0, available))
+        if allowed <= 0:
+            return
+        self.resize(self.width + allowed, self.height)
+
+    def resize_top(self, delta: int):
+        """Increase height upward, staying within the current monitor."""
+        if delta <= 0:
+            return
+        monitor = self.monitor
+        allowed = delta if monitor is None else min(delta, max(0, self.y - monitor.y))
+        if allowed <= 0:
+            return
+        new_y = self.y - allowed
+        new_height = self.height + allowed
+        self.set_position(self.x, new_y)
+        self.resize(self.width, new_height)
+
+    def resize_down(self, delta: int):
+        """Increase height downward, staying within the current monitor."""
+        if delta <= 0:
+            return
+        monitor = self.monitor
+        if monitor is None:
+            allowed = delta
+        else:
+            bottom_edge = self.y + self.height
+            available = monitor.y + monitor.height - bottom_edge
+            allowed = min(delta, max(0, available))
+        if allowed <= 0:
+            return
+        self.resize(self.width, self.height + allowed)
+
     def minimize(self):
         """Minimize window."""
         self.wm.minimize_window(self)
