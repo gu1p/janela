@@ -14,6 +14,7 @@ import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
+import sys
 from janela.interfaces import Janela
 from janela.interfaces.models import Monitor, Window
 from janela.logger import logger
@@ -65,6 +66,11 @@ def _window_summary(win: Window, members: Optional[List[str]] = None) -> str:
     names = members if members is not None else [win.name]
     names_text = ", ".join(names)
     return f"{win.id}:[{names_text}] ({win.width}x{win.height}@{win.x},{win.y})"
+
+
+def _running_interactively() -> bool:
+    """Return True when stdout or stderr is attached to a TTY."""
+    return sys.stdout.isatty() or sys.stderr.isatty()
 
 
 @dataclass
@@ -352,9 +358,15 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
         self._cache_valid = False
 
     def _ensure_accessibility_permissions(self) -> None:
-        logger.info("Ensuring Accessibility permissions are granted")
+        interactive = _running_interactively()
+        logger.info("Ensuring Accessibility permissions are granted (interactive=%s)", interactive)
         options = None
-        if AXIsProcessTrustedWithOptions and kAXTrustedCheckOptionPrompt and CFDictionaryCreate:
+        if (
+            interactive
+            and AXIsProcessTrustedWithOptions
+            and kAXTrustedCheckOptionPrompt
+            and CFDictionaryCreate
+        ):
             keys = (c_void_p * 1)(kAXTrustedCheckOptionPrompt)
             values = (c_void_p * 1)(kCFBooleanTrue)
             options = CFDictionaryCreate(None, keys, values, 1, None, None)
@@ -367,14 +379,27 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
             _safe_cf_release(options)
 
         if not trusted:
-            raise PermissionError(
-                "Janela requires Accessibility access. Grant permission in "
-                "System Settings → Privacy & Security → Accessibility and re-run."
+            if interactive:
+                raise PermissionError(
+                    "Janela requires Accessibility access. Grant permission in "
+                    "System Settings → Privacy & Security → Accessibility and re-run."
+                )
+            logger.warning(
+                "Accessibility permission missing; running non-interactively so no prompt will be shown."
             )
+            logger.warning(
+                "Grant Accessibility for this executable in System Settings -> Privacy & Security -> Accessibility: %s",
+                sys.executable,
+            )
+            logger.warning(
+                "Janela will continue, but macOS window controls may fail until permission is granted."
+            )
+            return
         logger.info("Accessibility permissions verified")
 
     def _ensure_screen_recording_permissions(self) -> None:
-        logger.info("Ensuring Screen Recording permissions are granted")
+        interactive = _running_interactively()
+        logger.info("Ensuring Screen Recording permissions are granted (interactive=%s)", interactive)
         if self._screen_recording_checked:
             logger.debug("Screen recording permissions already checked")
             return
@@ -387,7 +412,7 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
         except Exception:
             pass
 
-        if CGRequestScreenCaptureAccess:
+        if CGRequestScreenCaptureAccess and interactive:
             try:
                 if CGRequestScreenCaptureAccess():
                     logger.debug("Screen capture access granted via prompt")
@@ -395,7 +420,20 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
             except Exception:
                 pass
 
-        self._open_screen_recording_settings()
+        if interactive:
+            self._open_screen_recording_settings()
+            return
+
+        logger.warning(
+            "Screen Recording permission missing; running non-interactively so not prompting."
+        )
+        logger.warning(
+            "Open System Settings -> Privacy & Security -> Screen Recording and enable it for: %s",
+            sys.executable,
+        )
+        logger.warning(
+            "Window enumeration may be incomplete until permission is granted."
+        )
 
     def _open_screen_recording_settings(self) -> None:
         logger.info("Opening Screen Recording settings for user action")
