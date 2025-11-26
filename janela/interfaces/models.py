@@ -31,6 +31,17 @@ class Monitor:
         """Whether a point lies within the monitor bounds."""
         return self.x <= x < self.x + self.width and self.y <= y < self.y + self.height
 
+    def overlap_area(self, window: "Window") -> int:
+        """Area of overlap between this monitor and a window."""
+        wx1, wy1 = window.x, window.y
+        wx2 = wx1 + max(window.width, 1)
+        wy2 = wy1 + max(window.height, 1)
+        mx1, my1 = self.x, self.y
+        mx2, my2 = self.x + self.width, self.y + self.height
+        inter_w = max(0, min(wx2, mx2) - max(wx1, mx1))
+        inter_h = max(0, min(wy2, my2) - max(wy1, my1))
+        return inter_w * inter_h
+
     def is_vertical(self) -> bool:
         """True if height exceeds width."""
         return self.height > self.width

@@ -345,6 +345,8 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
         self._max_display_extent: Optional[int] = None
         # Track per-display backing scale (device pixels per point) for coordinate conversions.
         self._display_scales: Dict[int, float] = {}
+        # Track whether CoreGraphics bounds are already in logical points (e.g., built-in Retina).
+        self._bounds_in_points: Dict[int, bool] = {}
         logger.debug("Starting state: caches empty, restore bounds cleared")
         self._ensure_accessibility_permissions()
         self._ensure_screen_recording_permissions()
@@ -543,6 +545,8 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
                 bounds = CGDisplayBounds(display_id)
                 max_extent = max(max_extent, int(bounds.origin.y + bounds.size.height))
                 scale = 1.0
+                pixel_width = 0
+                pixel_height = 0
                 if CGDisplayCopyDisplayMode:
                     mode = CGDisplayCopyDisplayMode(display_id)
                     if mode:
@@ -559,14 +563,21 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
                             if CGDisplayModeRelease:
                                 CGDisplayModeRelease(mode)
                 self._display_scales[int(display_id)] = scale or 1.0
+                # Detect when CoreGraphics bounds are already in logical points (common for built-in Retina).
+                bounds_scale = 0.0
+                if pixel_width and int(bounds.size.width):
+                    bounds_scale = pixel_width / float(bounds.size.width)
+                bounds_in_points = scale > 1.5 and bounds_scale > 1.5 and abs(bounds_scale - scale) < 0.25
+                self._bounds_in_points[int(display_id)] = bounds_in_points
                 logger.debug(
-                    "Display %s scale set to %.2f (raw bounds: x=%d y=%d w=%d h=%d)",
+                    "Display %s scale set to %.2f (raw bounds: x=%d y=%d w=%d h=%d, bounds_in_points=%s)",
                     display_id,
                     self._display_scales[int(display_id)],
                     int(bounds.origin.x),
                     int(bounds.origin.y),
                     int(bounds.size.width),
                     int(bounds.size.height),
+                    bounds_in_points,
                 )
                 monitor = Monitor(
                     wm=self,
@@ -733,6 +744,8 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
         Defaults to 1.0 when unknown to avoid altering coordinates on non-HiDPI displays.
         """
         if monitor is None:
+            return 1.0
+        if self._bounds_in_points.get(monitor.id):
             return 1.0
         scale = self._display_scales.get(monitor.id, 1.0)
         return scale if scale > 0 else 1.0
@@ -1160,15 +1173,9 @@ class MacOSImpl(Janela):  # pylint: disable=too-many-public-methods
         monitors = self.get_monitors()
         best_monitor: Optional[Monitor] = None
         best_area = 0
-        wx1, wy1 = window.x, window.y
-        wx2, wy2 = window.x + window.width, window.y + window.height
 
         for monitor in monitors:
-            mx1, my1 = monitor.x, monitor.y
-            mx2, my2 = monitor.x + monitor.width, monitor.y + monitor.height
-            inter_w = max(0, min(wx2, mx2) - max(wx1, mx1))
-            inter_h = max(0, min(wy2, my2) - max(wy1, my1))
-            area = inter_w * inter_h
+            area = monitor.overlap_area(window)
             if area > best_area:
                 best_area = area
                 best_monitor = monitor

@@ -108,6 +108,15 @@ ja = Janela()
 effects.mosaic(ja)
 ```
 
+Arrange all other windows around the active window on its monitor (while other monitors use normal mosaic):
+
+```python
+from janela import Janela, effects
+
+ja = Janela()
+effects.mosaic_around_window(ja)
+```
+
 ### Moving a Window to Another Monitor
 
 ```python
